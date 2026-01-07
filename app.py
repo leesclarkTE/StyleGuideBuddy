@@ -33,39 +33,41 @@ uploaded_file = st.file_uploader(
 if uploaded_file:
     if st.button("▶️ Run style check"):
         with st.spinner("Checking document..."):
-            # Save uploaded file to temp location
+            # Save uploaded file to temporary location
             with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as tmp:
                 tmp.write(uploaded_file.read())
                 temp_path = tmp.name
 
-            # Run analysis (rules pulled from JSON inside analyze_doc)
+            # -------------------------
+            # Analyze document (highlight issues, no replacements)
+            # -------------------------
             doc, results = analyze_doc(temp_path)
 
-            # Save corrected Word file
-            output_path = temp_path.replace(".docx", "_checked.docx")
+            # Save highlighted Word file
+            output_path = temp_path.replace(".docx", "_highlighted.docx")
             doc.save(output_path)
 
         st.success("✅ Check complete")
 
         # -------------------------
-        # DOWNLOAD
+        # DOWNLOAD HIGHLIGHTED FILE
         # -------------------------
         st.download_button(
-            "⬇️ Download corrected Word document",
+            "⬇️ Download highlighted Word document",
             data=open(output_path, "rb"),
-            file_name="Textile_Exchange_Checked.docx",
+            file_name="Textile_Exchange_Highlighted.docx",
             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         )
 
         # -------------------------
-        # RESULTS
+        # DISPLAY ISSUES
         # -------------------------
         st.subheader("📋 Issues found")
 
         if not results:
             st.success("No issues found 🎉")
         else:
-            # Group issues by paragraph
+            # Group results by paragraph
             para_results = defaultdict(list)
             for r in results:
                 para_results[r["paragraph_index"]].append(r)
@@ -73,29 +75,15 @@ if uploaded_file:
             for para_idx in sorted(para_results.keys()):
                 para_items = para_results[para_idx]
 
-                # Clean, compact context (no large fonts, no markdown tricks)
-                context_text = (
-                    para_items[0]["context"]
-                    .replace("\n", " ")
-                    .replace("\r", " ")
-                )
+                # Full paragraph context
+                context_text = para_items[0]["context"].replace("\n", " ").replace("\r", " ")
+                st.markdown(f"**Paragraph {para_idx} context:** {context_text}")
 
-                snippet = context_text[:160]
-                if len(context_text) > 160:
-                    snippet += "…"
-
-                st.markdown(f"**Paragraph {para_idx} context:** {snippet}")
-
-                # -------------------------
-                # Display issues
-                # -------------------------
+                # Display each issue
                 for r in para_items:
                     # Collapse ALL CAPS sentence warnings to one per paragraph
                     if r["match"] == "ALL CAPS sentence":
-                        if any(
-                            prev is not r and prev["match"] == "ALL CAPS sentence"
-                            for prev in para_items
-                        ):
+                        if any(prev is not r and prev["match"] == "ALL CAPS sentence" for prev in para_items):
                             continue
 
                     icon = {
@@ -105,10 +93,7 @@ if uploaded_file:
                     }.get(r["severity"], "🟦")
 
                     reasoning = (r.get("message") or "").replace("_", "\\_").replace("*", "\\*")
-                    suggestion = (
-                        r.get("suggested_replacement") or "—"
-                    ).replace("_", "\\_").replace("*", "\\*")
-
+                    suggestion = "—"  # no replacements in this version
                     location = f"Paragraph {r['paragraph_index']}, Character {r['char_index']}"
 
                     st.markdown(
@@ -124,7 +109,7 @@ if uploaded_file:
                 st.markdown("---")
 
         # -------------------------
-        # CLEANUP
+        # CLEANUP TEMP FILE
         # -------------------------
         try:
             os.remove(temp_path)

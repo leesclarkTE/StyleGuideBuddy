@@ -3,7 +3,7 @@ import json
 import re
 from docx import Document
 from docx.shared import RGBColor
-from wordfreq import word_frequency  # <- Added for American English spellcheck
+from wordfreq import word_frequency  # For American English spellcheck
 
 # -------------------------
 # CONFIG
@@ -35,8 +35,10 @@ BRITISH_TO_AMERICAN = {
 # LOAD RULES
 # -------------------------
 def load_rules():
+    """Load rules from JSON and flatten into list of dicts"""
     if not os.path.exists(RULES_FILE):
         return []
+
     with open(RULES_FILE, "r", encoding="utf-8") as f:
         data = json.load(f)
 
@@ -47,7 +49,8 @@ def load_rules():
                 "pattern": item["match"],
                 "replacement": item.get("replace_with"),
                 "message": item.get("message", ""),
-                "severity": item.get("severity", "warning")
+                "severity": item.get("severity", "warning"),
+                "type": item.get("type", "flag")  # flag or auto_fix
             })
     return rules
 
@@ -62,6 +65,7 @@ def is_all_caps(text):
 # MAIN ANALYSIS
 # -------------------------
 def analyze_doc(uploaded_file):
+    """Analyze a Word doc and highlight issues without replacing text."""
     doc = Document(uploaded_file)
     rules = load_rules()
     results = []
@@ -88,6 +92,7 @@ def analyze_doc(uploaded_file):
         for rule in rules:
             if not rule["pattern"]:
                 continue
+
             for m in re.finditer(rf"\b{re.escape(rule['pattern'])}\b", text, re.IGNORECASE):
                 start, end = m.start(), m.end()
 
@@ -96,19 +101,17 @@ def analyze_doc(uploaded_file):
                 if (rule["pattern"], para_idx) in reported:
                     continue
 
+                # Highlight the matched text
                 color = SEVERITY_COLOR_RGB.get(rule["severity"], RGBColor(255,0,0))
                 for i in range(start, end):
                     char_to_run[i].font.color.rgb = color
                     applied_indices.add(i)
 
-                if rule["replacement"]:
-                    char_to_run[start].text = rule["replacement"]
-
                 results.append({
                     "match": m.group(),
                     "severity": rule["severity"],
                     "message": rule["message"],
-                    "suggested_replacement": rule.get("replacement", ""),
+                    "suggested_replacement": "",  # no replacement
                     "context": text,
                     "paragraph_index": para_idx,
                     "char_index": start + 1
@@ -120,9 +123,8 @@ def analyze_doc(uploaded_file):
         # -------------------------
         words = re.findall(r"\b[A-Za-z]{2,}\b", text)
         caps_words = [w for w in words if w.isupper()]
-
         if words and len(caps_words) / len(words) >= 0.6:
-            if not any(r['paragraph_index']==para_idx and r.get('all_caps') for r in results):
+            if not any(r.get('all_caps') and r['paragraph_index']==para_idx for r in results):
                 for m in re.finditer(r"\b[A-Z]{2,}\b", text):
                     start, end = m.start(), m.end()
                     if any(i in applied_indices for i in range(start, end)):
@@ -135,7 +137,7 @@ def analyze_doc(uploaded_file):
                     "match": "ALL CAPS sentence",
                     "severity": "warning",
                     "message": "Avoid full capitalisation. Use sentence case unless this is an approved acronym.",
-                    "suggested_replacement": "Use sentence case",
+                    "suggested_replacement": "",
                     "context": text,
                     "paragraph_index": para_idx,
                     "char_index": 1,
@@ -144,10 +146,10 @@ def analyze_doc(uploaded_file):
         else:
             # Single ALL CAPS words
             for m in re.finditer(r"\b[A-Z]{3,}\b", text):
-                word = m.group()
                 start, end = m.start(), m.end()
                 if any(i in applied_indices for i in range(start, end)):
                     continue
+                word = m.group()
                 for i in range(start, end):
                     char_to_run[i].font.color.rgb = SEVERITY_COLOR_RGB["warning"]
                     applied_indices.add(i)
@@ -156,7 +158,7 @@ def analyze_doc(uploaded_file):
                     "match": word,
                     "severity": "warning",
                     "message": "Avoid full capitalisation. Use sentence case unless this is an approved acronym.",
-                    "suggested_replacement": word.capitalize(),
+                    "suggested_replacement": "",
                     "context": text,
                     "paragraph_index": para_idx,
                     "char_index": start + 1
@@ -179,7 +181,7 @@ def analyze_doc(uploaded_file):
                     "match": word,
                     "severity": "warning",
                     "message": "British spelling detected. Use American English.",
-                    "suggested_replacement": BRITISH_TO_AMERICAN[lower],
+                    "suggested_replacement": "",
                     "context": text,
                     "paragraph_index": para_idx,
                     "char_index": start + 1
@@ -196,7 +198,7 @@ def analyze_doc(uploaded_file):
             if not word.isalpha():
                 continue
             freq = word_frequency(word.lower(), 'en')
-            if freq < 1e-6:  # very rare or unknown word → likely misspelled
+            if freq < 1e-6:
                 for i in range(start, end):
                     char_to_run[i].font.color.rgb = SEVERITY_COLOR_RGB["error"]
                     applied_indices.add(i)

@@ -15,28 +15,52 @@
     },
     {
       "match": "degrowth",
-      "type": "flag",
+      "replace_with": "slow growth",
+      "type": "auto_fix",
       "severity": "error",
       "message": "Avoid the term 'degrowth'. Use 'slow growth' instead."
     },
     {
       "match": "&",
-      "message": "Textile Exchange style guide doe not like &",
+      "replace_with": "and",
+      "type": "auto_fix",
       "severity": "warning",
-      "replace_with": "and"
+      "message": "Textile Exchange style guide does not like &"
     },
     {
       "match": "organisations",
-      "message": "Textile Exchange use American English",
+      "replace_with": "organizations",
+      "type": "auto_fix",
       "severity": "error",
-      "replace_with": "organizations"
+      "message": "Textile Exchange uses American English"
+    },
+    {
+      "match": "companys",
+      "replace_with": "companies",
+      "type": "auto_fix",
+      "severity": "error",
+      "message": "Correct spelling to 'companies'."
+    },
+    {
+      "match": "meeningful",
+      "replace_with": "meaningful",
+      "type": "auto_fix",
+      "severity": "error",
+      "message": "Correct spelling to 'meaningful'."
     }
   ],
   "flag_only": [
     {
       "match": "sustainable",
+      "type": "flag",
       "severity": "warning",
       "message": "Avoid generic sustainability claims unless supported by concrete evidence."
+    },
+    {
+      "match": "ALL CAPS sentence",
+      "type": "flag",
+      "severity": "warning",
+      "message": "Avoid writing entire sentences in ALL CAPS."
     }
   ]
 }
