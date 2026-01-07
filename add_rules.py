@@ -8,7 +8,7 @@ from pathlib import Path
 CURRENT_FILE = Path(__file__).resolve()
 
 def find_repo_root(start_path: Path) -> Path:
-    """Walk upward until we find the Rules directory"""
+    """Walk upward until we find the Rules directory or fallback to parent"""
     for parent in [start_path] + list(start_path.parents):
         if (parent / "Rules").exists():
             return parent
@@ -21,8 +21,14 @@ RULES_FILE = REPO_ROOT / "Rules" / "Textile_Exchange_Style_Guide_STRICT.json"
 # HELPER FUNCTIONS
 # -------------------------
 def load_rules():
+    """Load rules JSON or create a new default structure if missing"""
     if not RULES_FILE.exists():
-        return {"terminology": [], "flag_only": []}
+        # Create empty JSON structure if missing
+        RULES_FILE.parent.mkdir(parents=True, exist_ok=True)
+        default_rules = {"terminology": [], "flag_only": []}
+        with RULES_FILE.open("w", encoding="utf-8") as f:
+            json.dump(default_rules, f, indent=2, ensure_ascii=False)
+        return default_rules
     with RULES_FILE.open("r", encoding="utf-8") as f:
         return json.load(f)
 
@@ -56,21 +62,6 @@ def display_rules(section_name, rules_data):
 # -------------------------
 st.title("📝 Textile Exchange Style Rules Editor")
 
-# -------------------------
-# DEBUG PANEL (KEEP FOR NOW)
-# -------------------------
-st.caption("🔎 Debug information")
-st.code(f"""
-Current file: {CURRENT_FILE}
-Repo root: {REPO_ROOT}
-Rules file: {RULES_FILE}
-Rules exists: {RULES_FILE.exists()}
-""")
-
-if not RULES_FILE.exists():
-    st.error("❌ Rules JSON file NOT found by Streamlit")
-else:
-    st.success("✅ Rules JSON file loaded successfully")
 
 # -------------------------
 # LOAD RULES
