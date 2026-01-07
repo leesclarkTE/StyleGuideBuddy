@@ -1,0 +1,33 @@
+import PyPDF2
+import yaml
+
+pdf_path = "Textile_Exchange_Style_Guide.pdf"
+
+with open(pdf_path, "rb") as f:
+    reader = PyPDF2.PdfReader(f)
+    text = ""
+    for page in reader.pages:
+        text += page.extract_text() + "\n"
+
+lines = text.split("\n")
+rules = {}
+
+for line in lines:
+    line = line.strip()
+    if not line or "→" not in line:
+        continue
+    term, replacement_part = line.split("→")
+    term = term.strip()
+    replacement_part = replacement_part.strip()
+    if replacement_part.lower().startswith("message:"):
+        rules[term] = {"message": replacement_part.replace("message:", "").strip(), "auto_fix": False}
+    else:
+        rules[term] = {"replacement": replacement_part, "auto_fix": True}
+
+with open("rules/terminology.yml", "w") as f:
+    yaml.dump(rules, f, sort_keys=False)
+
+print("terminology.yml created!")
+ls
+cd "/Users/leeclark/Documents/TextileExchangeStyleChecker"
+
