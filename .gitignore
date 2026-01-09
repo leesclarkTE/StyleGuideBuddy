@@ -59,3 +59,11 @@ data/*.json
 *.pdf
 *.xlsx
 tmp/
+# Secrets
+.streamlit/secrets.toml
+.streamlit/*.json
+service_account.json
+*.pem
+*.key
+*.crt
+*.p12
