@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.pyc
+.env
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Local credentials (DO NOT COMMIT)
+service_account.json
+
+# Temp files
+*.docx
+*.tmp
