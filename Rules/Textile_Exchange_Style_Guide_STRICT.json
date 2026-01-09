@@ -1,65 +1,82 @@
 {
   "style_guide_rule": [
     {
+      "match": "indigenous peoples",
+      "replace_with": "Indigenous Peoples",
+      "message": "Caps needed",
+      "case_sensitive": false
+    },
+    {
       "match": "co-ordinate",
       "replace_with": "coordinate",
-      "message": "Preferred wording"
+      "message": "Preferred wording",
+      "case_sensitive": false
     },
     {
       "match": "co-operate",
       "replace_with": "cooperate",
-      "message": "Preferred wording"
+      "message": "Preferred wording",
+      "case_sensitive": false
     },
     {
       "match": "global warming",
       "replace_with": "climate change",
-      "message": "Preferred wording"
+      "message": "Preferred wording",
+      "case_sensitive": false
     },
     {
       "match": "backwards",
       "replace_with": "backward",
-      "message": "Preferred wording"
+      "message": "Preferred wording",
+      "case_sensitive": false
     },
     {
       "match": "The Textile Exchange",
       "type": "flag",
       "severity": "warning",
-      "message": "Never use 'The Textile Exchange'. Use 'Textile Exchange'."
+      "message": "Never use 'The Textile Exchange'. Use 'Textile Exchange'.",
+      "replace_with": null,
+      "case_sensitive": false
     },
     {
       "match": "degrowth",
       "replace_with": "slow growth",
       "type": "auto_fix",
       "severity": "error",
-      "message": "Avoid the term 'degrowth'. Use 'slow growth' instead."
+      "message": "Avoid the term 'degrowth'. Use 'slow growth' instead.",
+      "case_sensitive": false
     },
     {
       "match": "&",
       "replace_with": "and",
       "type": "auto_fix",
       "severity": "warning",
-      "message": "Textile Exchange style guide does not like &"
+      "message": "Textile Exchange style guide does not like &",
+      "case_sensitive": false
     },
     {
       "match": "organisations",
       "replace_with": "organizations",
       "type": "auto_fix",
       "severity": "error",
-      "message": "Textile Exchange uses American English"
+      "message": "Textile Exchange uses American English",
+      "case_sensitive": false
     },
     {
       "match": "companys",
       "replace_with": "companies",
       "type": "auto_fix",
       "severity": "error",
-      "message": "Correct spelling to 'companies'."
+      "message": "Correct spelling to 'companies'.",
+      "case_sensitive": false
     },
     {
       "match": "meeningful",
       "replace_with": "meaningful",
       "type": "auto_fix",
       "severity": "error",
-      "message": "Correct spelling to 'meaningful'."
+      "message": "Correct spelling to 'meaningful'.",
+      "case_sensitive": false
     }
   ],
   "style_guide_caution": [
@@ -67,7 +84,9 @@
       "match": "sustainable",
       "type": "flag",
       "severity": "warning",
-      "message": "Avoid generic sustainability claims unless supported by concrete evidence."
+      "message": "Avoid generic sustainability claims unless supported by concrete evidence.",
+      "replace_with": null,
+      "case_sensitive": false
     }
   ]
 }
