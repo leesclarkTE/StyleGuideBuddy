@@ -1,34 +1,20 @@
-# Python
-__pycache__/
-*.pyc
-.env
 
-# Streamlit
-.streamlit/secrets.toml
-
-# Local credentials (DO NOT COMMIT)
-service_account.json
-
-# Temp files
-*.docx
-*.tmp
 # =========================
-# Python / build artifacts
+# Python / Build Artifacts
 # =========================
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
+*.py[cod]
 *.egg-info/
 dist/
 build/
 
 # =========================
-# Virtual envs / dotenv
+# Virtual Environments / Dotenv
 # =========================
 .env
 .venv/
 venv/
+ENV/
 
 # =========================
 # Streamlit
@@ -36,22 +22,21 @@ venv/
 .streamlit/secrets.toml
 .streamlit/state/
 .streamlit/config.toml
+.streamlit/*.json  # Ignore any JSON secrets/config files
 
 # =========================
-# 🔒 Secrets & keys (DO NOT COMMIT)
+# 🔒 Secrets & Keys (DO NOT COMMIT)
 # =========================
 service_account.json
 *.pem
 *.key
 *.crt
 *.p12
-*.json
-
-# If you keep JSON in app data, ignore those too:
-data/*.json
+*.json  # If you store sensitive JSON files, ignore them globally
+data/*.json  # Ignore JSON in data folder
 
 # =========================
-# Temp files / outputs
+# Temp Files / Outputs
 # =========================
 *.tmp
 *.log
@@ -59,11 +44,4 @@ data/*.json
 *.pdf
 *.xlsx
 tmp/
-# Secrets
-.streamlit/secrets.toml
-.streamlit/*.json
-service_account.json
-*.pem
-*.key
-*.crt
-*.p12
+
