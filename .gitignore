@@ -12,3 +12,50 @@ service_account.json
 # Temp files
 *.docx
 *.tmp
+# =========================
+# Python / build artifacts
+# =========================
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# =========================
+# Virtual envs / dotenv
+# =========================
+.env
+.venv/
+venv/
+
+# =========================
+# Streamlit
+# =========================
+.streamlit/secrets.toml
+.streamlit/state/
+.streamlit/config.toml
+
+# =========================
+# 🔒 Secrets & keys (DO NOT COMMIT)
+# =========================
+service_account.json
+*.pem
+*.key
+*.crt
+*.p12
+*.json
+
+# If you keep JSON in app data, ignore those too:
+data/*.json
+
+# =========================
+# Temp files / outputs
+# =========================
+*.tmp
+*.log
+*.docx
+*.pdf
+*.xlsx
+tmp/
