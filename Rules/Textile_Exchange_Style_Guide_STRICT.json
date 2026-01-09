@@ -1,11 +1,24 @@
 {
-  "terminology": [
+  "style_guide_rule": [
     {
-      "match": "towards",
-      "replace_with": "toward",
-      "type": "auto_fix",
-      "severity": "advice",
-      "message": "Use US English: 'toward' not 'towards'."
+      "match": "co-ordinate",
+      "replace_with": "coordinate",
+      "message": "Preferred wording"
+    },
+    {
+      "match": "co-operate",
+      "replace_with": "cooperate",
+      "message": "Preferred wording"
+    },
+    {
+      "match": "global warming",
+      "replace_with": "climate change",
+      "message": "Preferred wording"
+    },
+    {
+      "match": "backwards",
+      "replace_with": "backward",
+      "message": "Preferred wording"
     },
     {
       "match": "The Textile Exchange",
@@ -49,18 +62,12 @@
       "message": "Correct spelling to 'meaningful'."
     }
   ],
-  "flag_only": [
+  "style_guide_caution": [
     {
       "match": "sustainable",
       "type": "flag",
       "severity": "warning",
       "message": "Avoid generic sustainability claims unless supported by concrete evidence."
-    },
-    {
-      "match": "ALL CAPS sentence",
-      "type": "flag",
-      "severity": "warning",
-      "message": "Avoid writing entire sentences in ALL CAPS."
     }
   ]
 }

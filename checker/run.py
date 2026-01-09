@@ -10,10 +10,10 @@ from wordfreq import word_frequency  # For American English spellcheck
 # -------------------------
 RULES_FILE = "Rules/Textile_Exchange_Style_Guide_STRICT.json"
 
-SEVERITY_COLOR_RGB = {
-    "advice": RGBColor(255, 255, 0),    # Yellow
-    "warning": RGBColor(255, 165, 0),   # Orange
-    "error": RGBColor(255, 0, 0),       # Red
+# Map rule categories to colors
+RULE_COLOR_RGB = {
+    "style guide rule": RGBColor(255, 0, 0),      # RED
+    "style guide caution": RGBColor(255, 165, 0)  # ORANGE
 }
 
 # British → American spellings
@@ -35,7 +35,7 @@ BRITISH_TO_AMERICAN = {
 # LOAD RULES
 # -------------------------
 def load_rules():
-    """Load rules from JSON and flatten into list of dicts"""
+    """Load rules from JSON and normalize to 'style guide rule' or 'style guide caution'"""
     if not os.path.exists(RULES_FILE):
         return []
 
@@ -45,13 +45,17 @@ def load_rules():
     rules = []
     for section in data.values():
         for item in section:
+            raw_type = item.get("type", "flag_only")
+
+            # Map types → only two categories
+            rule_type = "style guide caution" if raw_type == "flag_only" else "style guide rule"
+
             rules.append({
                 "pattern": item["match"],
-                "replacement": item.get("replace_with"),
                 "message": item.get("message", ""),
-                "severity": item.get("severity", "warning"),
-                "type": item.get("type", "flag")  # flag or auto_fix
+                "rule_type": rule_type
             })
+
     return rules
 
 # -------------------------
@@ -65,7 +69,7 @@ def is_all_caps(text):
 # MAIN ANALYSIS
 # -------------------------
 def analyze_doc(uploaded_file):
-    """Analyze a Word doc and highlight issues without replacing text."""
+    """Analyze a Word doc and highlight issues using only style guide rule / caution."""
     doc = Document(uploaded_file)
     rules = load_rules()
     results = []
@@ -87,31 +91,28 @@ def analyze_doc(uploaded_file):
         reported = set()
 
         # -------------------------
-        # STYLE / TERMINOLOGY RULES
+        # STYLE GUIDE RULES
         # -------------------------
         for rule in rules:
             if not rule["pattern"]:
                 continue
-
             for m in re.finditer(rf"\b{re.escape(rule['pattern'])}\b", text, re.IGNORECASE):
                 start, end = m.start(), m.end()
-
                 if any(i in applied_indices for i in range(start, end)):
                     continue
                 if (rule["pattern"], para_idx) in reported:
                     continue
 
-                # Highlight the matched text
-                color = SEVERITY_COLOR_RGB.get(rule["severity"], RGBColor(255,0,0))
+                color = RULE_COLOR_RGB.get(rule["rule_type"], RGBColor(255, 0, 0))
                 for i in range(start, end):
                     char_to_run[i].font.color.rgb = color
                     applied_indices.add(i)
 
                 results.append({
                     "match": m.group(),
-                    "severity": rule["severity"],
+                    "rule_category": rule["rule_type"].title(),
                     "message": rule["message"],
-                    "suggested_replacement": "",  # no replacement
+                    "suggested_replacement": "",
                     "context": text,
                     "paragraph_index": para_idx,
                     "char_index": start + 1
@@ -123,46 +124,26 @@ def analyze_doc(uploaded_file):
         # -------------------------
         words = re.findall(r"\b[A-Za-z]{2,}\b", text)
         caps_words = [w for w in words if w.isupper()]
-        if words and len(caps_words) / len(words) >= 0.6:
-            if not any(r.get('all_caps') and r['paragraph_index']==para_idx for r in results):
-                for m in re.finditer(r"\b[A-Z]{2,}\b", text):
-                    start, end = m.start(), m.end()
-                    if any(i in applied_indices for i in range(start, end)):
-                        continue
-                    for i in range(start, end):
-                        char_to_run[i].font.color.rgb = SEVERITY_COLOR_RGB["warning"]
-                        applied_indices.add(i)
 
-                results.append({
-                    "match": "ALL CAPS sentence",
-                    "severity": "warning",
-                    "message": "Avoid full capitalisation. Use sentence case unless this is an approved acronym.",
-                    "suggested_replacement": "",
-                    "context": text,
-                    "paragraph_index": para_idx,
-                    "char_index": 1,
-                    "all_caps": True
-                })
-        else:
-            # Single ALL CAPS words
-            for m in re.finditer(r"\b[A-Z]{3,}\b", text):
+        if words and len(caps_words) / len(words) >= 0.6:
+            for m in re.finditer(r"\b[A-Z]{2,}\b", text):
                 start, end = m.start(), m.end()
                 if any(i in applied_indices for i in range(start, end)):
                     continue
-                word = m.group()
                 for i in range(start, end):
-                    char_to_run[i].font.color.rgb = SEVERITY_COLOR_RGB["warning"]
+                    char_to_run[i].font.color.rgb = RULE_COLOR_RGB["style guide caution"]
                     applied_indices.add(i)
 
-                results.append({
-                    "match": word,
-                    "severity": "warning",
-                    "message": "Avoid full capitalisation. Use sentence case unless this is an approved acronym.",
-                    "suggested_replacement": "",
-                    "context": text,
-                    "paragraph_index": para_idx,
-                    "char_index": start + 1
-                })
+            results.append({
+                "match": "ALL CAPS sentence",
+                "rule_category": "Style guide caution",
+                "message": "Avoid full capitalisation. Use sentence case unless this is an approved acronym.",
+                "suggested_replacement": "",
+                "context": text,
+                "paragraph_index": para_idx,
+                "char_index": 1,
+                "all_caps": True
+            })
 
         # -------------------------
         # BRITISH SPELLING CHECK
@@ -171,15 +152,14 @@ def analyze_doc(uploaded_file):
             word = m.group()
             lower = word.lower()
             start, end = m.start(), m.end()
-
             if lower in BRITISH_TO_AMERICAN and not any(i in applied_indices for i in range(start, end)):
                 for i in range(start, end):
-                    char_to_run[i].font.color.rgb = SEVERITY_COLOR_RGB["warning"]
+                    char_to_run[i].font.color.rgb = RULE_COLOR_RGB["style guide caution"]
                     applied_indices.add(i)
 
                 results.append({
                     "match": word,
-                    "severity": "warning",
+                    "rule_category": "Style guide caution",
                     "message": "British spelling detected. Use American English.",
                     "suggested_replacement": "",
                     "context": text,
@@ -188,7 +168,7 @@ def analyze_doc(uploaded_file):
                 })
 
         # -------------------------
-        # AMERICAN ENGLISH SPELLCHECK (wordfreq)
+        # AMERICAN ENGLISH SPELLCHECK
         # -------------------------
         for m in re.finditer(r"\b[A-Za-z']+\b", text):
             word = m.group()
@@ -197,14 +177,16 @@ def analyze_doc(uploaded_file):
                 continue
             if not word.isalpha():
                 continue
-            freq = word_frequency(word.lower(), 'en')
+
+            freq = word_frequency(word.lower(), "en")
             if freq < 1e-6:
                 for i in range(start, end):
-                    char_to_run[i].font.color.rgb = SEVERITY_COLOR_RGB["error"]
+                    char_to_run[i].font.color.rgb = RULE_COLOR_RGB["style guide rule"]
                     applied_indices.add(i)
+
                 results.append({
                     "match": word,
-                    "severity": "error",
+                    "rule_category": "Style guide rule",
                     "message": "Word not recognized in American English dictionary.",
                     "suggested_replacement": "",
                     "context": text,

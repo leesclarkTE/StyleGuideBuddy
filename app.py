@@ -15,9 +15,22 @@ st.set_page_config(
 st.title("📘 Textile Exchange Style Checker")
 
 st.caption(
-    "Upload a Word document to check it against the Textile Exchange style rules. "
-    "Errors, warnings, and advice are highlighted in the document and explained below."
+    "Upload a Word document to check it against the Textile Exchange style guide. "
+    "Style guide rules and cautions are highlighted in the document and explained below."
 )
+
+# -------------------------
+# UI LABEL MAPPING
+# -------------------------
+SEVERITY_LABELS = {
+    "style guide rule": "Style guide rule",
+    "style guide caution": "Style guide caution"
+}
+
+SEVERITY_ICONS = {
+    "style guide rule": "🟥",   # red
+    "style guide caution": "🟧" # orange
+}
 
 # -------------------------
 # FILE UPLOAD
@@ -38,9 +51,7 @@ if uploaded_file:
                 tmp.write(uploaded_file.read())
                 temp_path = tmp.name
 
-            # -------------------------
-            # Analyze document (highlight issues, no replacements)
-            # -------------------------
+            # Analyze document (highlight only, no replacements)
             doc, results = analyze_doc(temp_path)
 
             # Save highlighted Word file
@@ -50,24 +61,24 @@ if uploaded_file:
         st.success("✅ Check complete")
 
         # -------------------------
-        # DOWNLOAD HIGHLIGHTED FILE
+        # DOWNLOAD
         # -------------------------
         st.download_button(
             "⬇️ Download highlighted Word document",
             data=open(output_path, "rb"),
-            file_name="Textile_Exchange_Highlighted.docx",
+            file_name="Textile_Exchange_Style_Checked.docx",
             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         )
 
         # -------------------------
         # DISPLAY ISSUES
         # -------------------------
-        st.subheader("📋 Issues found")
+        st.subheader("📋 Style guide issues found")
 
         if not results:
-            st.success("No issues found 🎉")
+            st.success("No style guide issues found 🎉")
         else:
-            # Group results by paragraph
+            # Group by paragraph
             para_results = defaultdict(list)
             for r in results:
                 para_results[r["paragraph_index"]].append(r)
@@ -75,33 +86,36 @@ if uploaded_file:
             for para_idx in sorted(para_results.keys()):
                 para_items = para_results[para_idx]
 
-                # Full paragraph context
-                context_text = para_items[0]["context"].replace("\n", " ").replace("\r", " ")
+                context_text = (
+                    para_items[0]["context"]
+                    .replace("\n", " ")
+                    .replace("\r", " ")
+                )
                 st.markdown(f"**Paragraph {para_idx} context:** {context_text}")
 
-                # Display each issue
                 for r in para_items:
                     # Collapse ALL CAPS sentence warnings to one per paragraph
                     if r["match"] == "ALL CAPS sentence":
-                        if any(prev is not r and prev["match"] == "ALL CAPS sentence" for prev in para_items):
+                        if any(
+                            prev is not r and prev["match"] == "ALL CAPS sentence"
+                            for prev in para_items
+                        ):
                             continue
 
-                    icon = {
-                        "advice": "🟨",
-                        "warning": "🟧",
-                        "error": "🟥"
-                    }.get(r["severity"], "🟦")
+                    # Map rule type to proper label/icon
+                    rule_category = r.get("rule_category", "style guide rule").lower()
+                    icon = SEVERITY_ICONS.get(rule_category, "🟥")
+                    label = SEVERITY_LABELS.get(rule_category, "Style guide rule")
 
                     reasoning = (r.get("message") or "").replace("_", "\\_").replace("*", "\\*")
-                    suggestion = "—"  # no replacements in this version
                     location = f"Paragraph {r['paragraph_index']}, Character {r['char_index']}"
 
                     st.markdown(
                         f"""
-{icon} **{r['match']} ({r['severity'].upper()})**
+{icon} **{label}**
 
-**Reasoning:** {reasoning}  
-**Suggestion:** {suggestion}  
+**Issue:** {r['match']}  
+**Explanation:** {reasoning}  
 **Location:** {location}
 """
                     )
@@ -109,7 +123,7 @@ if uploaded_file:
                 st.markdown("---")
 
         # -------------------------
-        # CLEANUP TEMP FILE
+        # CLEANUP
         # -------------------------
         try:
             os.remove(temp_path)
