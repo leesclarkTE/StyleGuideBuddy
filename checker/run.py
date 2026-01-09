@@ -35,7 +35,7 @@ BRITISH_TO_AMERICAN = {
 # LOAD RULES
 # -------------------------
 def load_rules():
-    """Load rules from JSON and normalize to 'style guide rule' or 'style guide caution'"""
+    """Load rules from JSON and normalize to two categories"""
     if not os.path.exists(RULES_FILE):
         return []
 
@@ -43,33 +43,32 @@ def load_rules():
         data = json.load(f)
 
     rules = []
-    for section in data.values():
+
+    for section_name, section in data.items():
         for item in section:
             raw_type = item.get("type", "flag_only")
 
-            # Map types → only two categories
-            rule_type = "style guide caution" if raw_type == "flag_only" else "style guide rule"
+            rule_type = (
+                "style guide caution"
+                if raw_type == "flag_only" or section_name == "style_guide_caution"
+                else "style guide rule"
+            )
 
             rules.append({
-                "pattern": item["match"],
+                "pattern": item.get("match", ""),
                 "message": item.get("message", ""),
-                "rule_type": rule_type
+                "replace_with": item.get("replace_with"),   # ✅ ADDED
+                "rule_type": rule_type,
+                "case_sensitive": item.get("case_sensitive", False)
             })
 
     return rules
 
 # -------------------------
-# HELPER
-# -------------------------
-def is_all_caps(text):
-    letters = re.findall(r"[A-Za-z]", text)
-    return letters and all(c.isupper() for c in letters)
-
-# -------------------------
 # MAIN ANALYSIS
 # -------------------------
 def analyze_doc(uploaded_file):
-    """Analyze a Word doc and highlight issues using only style guide rule / caution."""
+    """Analyze a Word doc and highlight issues"""
     doc = Document(uploaded_file)
     rules = load_rules()
     results = []
@@ -91,19 +90,28 @@ def analyze_doc(uploaded_file):
         reported = set()
 
         # -------------------------
-        # STYLE GUIDE RULES
+        # STYLE GUIDE RULES (CASE-AWARE)
         # -------------------------
         for rule in rules:
             if not rule["pattern"]:
                 continue
-            for m in re.finditer(rf"\b{re.escape(rule['pattern'])}\b", text, re.IGNORECASE):
+
+            flags = 0 if rule["case_sensitive"] else re.IGNORECASE
+
+            for m in re.finditer(
+                rf"\b{re.escape(rule['pattern'])}\b",
+                text,
+                flags
+            ):
                 start, end = m.start(), m.end()
+
                 if any(i in applied_indices for i in range(start, end)):
                     continue
                 if (rule["pattern"], para_idx) in reported:
                     continue
 
-                color = RULE_COLOR_RGB.get(rule["rule_type"], RGBColor(255, 0, 0))
+                color = RULE_COLOR_RGB[rule["rule_type"]]
+
                 for i in range(start, end):
                     char_to_run[i].font.color.rgb = color
                     applied_indices.add(i)
@@ -112,11 +120,12 @@ def analyze_doc(uploaded_file):
                     "match": m.group(),
                     "rule_category": rule["rule_type"].title(),
                     "message": rule["message"],
-                    "suggested_replacement": "",
+                    "suggested_replacement": rule.get("replace_with"),  # ✅ ADDED
                     "context": text,
                     "paragraph_index": para_idx,
                     "char_index": start + 1
                 })
+
                 reported.add((rule["pattern"], para_idx))
 
         # -------------------------
@@ -130,6 +139,7 @@ def analyze_doc(uploaded_file):
                 start, end = m.start(), m.end()
                 if any(i in applied_indices for i in range(start, end)):
                     continue
+
                 for i in range(start, end):
                     char_to_run[i].font.color.rgb = RULE_COLOR_RGB["style guide caution"]
                     applied_indices.add(i)
@@ -138,11 +148,10 @@ def analyze_doc(uploaded_file):
                 "match": "ALL CAPS sentence",
                 "rule_category": "Style guide caution",
                 "message": "Avoid full capitalisation. Use sentence case unless this is an approved acronym.",
-                "suggested_replacement": "",
+                "suggested_replacement": None,
                 "context": text,
                 "paragraph_index": para_idx,
-                "char_index": 1,
-                "all_caps": True
+                "char_index": 1
             })
 
         # -------------------------
@@ -152,6 +161,7 @@ def analyze_doc(uploaded_file):
             word = m.group()
             lower = word.lower()
             start, end = m.start(), m.end()
+
             if lower in BRITISH_TO_AMERICAN and not any(i in applied_indices for i in range(start, end)):
                 for i in range(start, end):
                     char_to_run[i].font.color.rgb = RULE_COLOR_RGB["style guide caution"]
@@ -161,7 +171,7 @@ def analyze_doc(uploaded_file):
                     "match": word,
                     "rule_category": "Style guide caution",
                     "message": "British spelling detected. Use American English.",
-                    "suggested_replacement": "",
+                    "suggested_replacement": BRITISH_TO_AMERICAN[lower],
                     "context": text,
                     "paragraph_index": para_idx,
                     "char_index": start + 1
@@ -173,6 +183,7 @@ def analyze_doc(uploaded_file):
         for m in re.finditer(r"\b[A-Za-z']+\b", text):
             word = m.group()
             start, end = m.start(), m.end()
+
             if any(i in applied_indices for i in range(start, end)):
                 continue
             if not word.isalpha():
@@ -188,7 +199,7 @@ def analyze_doc(uploaded_file):
                     "match": word,
                     "rule_category": "Style guide rule",
                     "message": "Word not recognized in American English dictionary.",
-                    "suggested_replacement": "",
+                    "suggested_replacement": None,
                     "context": text,
                     "paragraph_index": para_idx,
                     "char_index": start + 1

@@ -29,13 +29,13 @@ RULES_FILE = REPO_ROOT / "Rules" / "Textile_Exchange_Style_Guide_STRICT.json"
 CAPITALIZATION_RULES = {
     "indigenous people": "Indigenous People",
     "first nations": "First Nations",
-    # Add more capitalization-sensitive phrases here
 }
 
 # -------------------------
 # RULE STORAGE HELPERS
 # -------------------------
 def load_rules():
+    """Load rules from disk safely, normalizing old keys."""
     if not RULES_FILE.exists():
         RULES_FILE.parent.mkdir(parents=True, exist_ok=True)
         default = {"style_guide_rule": [], "style_guide_caution": []}
@@ -44,29 +44,40 @@ def load_rules():
 
     data = json.loads(RULES_FILE.read_text(encoding="utf-8"))
 
-    normalized = {"style_guide_rule": [], "style_guide_caution": []}
-    # Keep all rules, normalize old keys
-    normalized["style_guide_rule"].extend(data.get("style_guide_rule", []))
-    normalized["style_guide_rule"].extend(data.get("terminology", []))
-    normalized["style_guide_caution"].extend(data.get("style_guide_caution", []))
-    normalized["style_guide_caution"].extend(data.get("flag_only", []))
+    if "style_guide_rule" not in data:
+        data["style_guide_rule"] = []
+    if "style_guide_caution" not in data:
+        data["style_guide_caution"] = []
 
-    # Ensure all keys exist
+    if "terminology" in data:
+        data["style_guide_rule"].extend(data["terminology"])
+        del data["terminology"]
+    if "flag_only" in data:
+        data["style_guide_caution"].extend(data["flag_only"])
+        del data["flag_only"]
+
     for cat in ["style_guide_rule", "style_guide_caution"]:
-        for r in normalized[cat]:
+        for r in data[cat]:
             r.setdefault("match", "")
             r.setdefault("replace_with", None)
             r.setdefault("message", "")
             r.setdefault("case_sensitive", False)
 
-    return normalized
+    return data
 
 def save_rules(rules):
     RULES_FILE.parent.mkdir(parents=True, exist_ok=True)
     RULES_FILE.write_text(json.dumps(rules, indent=2, ensure_ascii=False), encoding="utf-8")
 
-def display_rules(section_name, rules_data):
+# -------------------------
+# STREAMLIT SESSION STATE INIT
+# -------------------------
+if "rules" not in st.session_state:
+    st.session_state.rules = load_rules()
+
+def display_rules(section_name):
     st.subheader(section_name.replace("_", " ").title())
+    rules_data = st.session_state.rules
     for idx, rule in enumerate(rules_data.get(section_name, [])):
         cols = st.columns([5, 1, 1])
         with cols[0]:
@@ -81,8 +92,10 @@ def display_rules(section_name, rules_data):
                 st.rerun()
         with cols[2]:
             if st.button("Delete", key=f"del_{section_name}_{idx}"):
-                return "delete", section_name, idx
-    return None, None, None
+                st.session_state.rules[section_name].pop(idx)
+                save_rules(st.session_state.rules)
+                st.rerun()
+    return None
 
 # -------------------------
 # DOC ANALYSIS
@@ -101,14 +114,14 @@ BRITISH_TO_AMERICAN = {
     "behaviour": "behavior",
 }
 
-def analyze_doc(path, rules_data):
+def analyze_doc(path):
     doc = Document(path)
     results = []
 
-    # Flatten rules and include capitalization rules
+    # Flatten all rules including capitalization rules
     rules = []
     for cat in ["style_guide_rule", "style_guide_caution"]:
-        for r in rules_data.get(cat, []):
+        for r in st.session_state.rules.get(cat, []):
             rules.append({
                 "pattern": r.get("match", ""),
                 "message": r.get("message", ""),
@@ -116,8 +129,6 @@ def analyze_doc(path, rules_data):
                 "case_sensitive": r.get("case_sensitive", False),
                 "rule_type": cat
             })
-
-    # Add capitalization rules as caution
     for phrase, correct in CAPITALIZATION_RULES.items():
         rules.append({
             "pattern": phrase,
@@ -141,20 +152,15 @@ def analyze_doc(path, rules_data):
 
         applied = set()
 
-        # Apply rules
         for rule in rules:
             flags = 0 if rule["case_sensitive"] else re.IGNORECASE
             for m in re.finditer(rf"\b{re.escape(rule['pattern'])}\b", text, flags):
                 s, e = m.start(), m.end()
                 if any(i in applied for i in range(s, e)):
                     continue
-
                 for i in range(s, e):
-                    char_to_run[i].font.color.rgb = SEVERITY_COLOR.get(
-                        rule["rule_type"], RGBColor(255, 0, 0)
-                    )
+                    char_to_run[i].font.color.rgb = SEVERITY_COLOR.get(rule["rule_type"], RGBColor(255,0,0))
                     applied.add(i)
-
                 results.append({
                     "match": m.group(),
                     "rule_category": rule["rule_type"],
@@ -165,7 +171,7 @@ def analyze_doc(path, rules_data):
                     "context": text
                 })
 
-        # British spelling check
+        # British spelling
         for m in re.finditer(r"\b[A-Za-z']+\b", text):
             word = m.group().lower()
             if word in BRITISH_TO_AMERICAN:
@@ -184,10 +190,10 @@ def analyze_doc(path, rules_data):
                     "context": text
                 })
 
-        # Full CAPS sentence check
+        # Full CAPS sentence
         words = re.findall(r"\b[A-Za-z]{2,}\b", text)
         caps_words = [w for w in words if w.isupper()]
-        if words and len(caps_words)/len(words) >= 0.6:  # threshold: 60%
+        if words and len(caps_words)/len(words) >= 0.6:
             for m in re.finditer(r"\b[A-Z]{2,}\b", text):
                 s, e = m.start(), m.end()
                 if any(i in applied for i in range(s, e)):
@@ -219,8 +225,6 @@ tab_rules, tab_check = st.tabs(["📋 Edit Rules", "📄 Style Checker"])
 # RULE EDITOR
 # -------------------------
 with tab_rules:
-    rules_data = load_rules()
-
     with st.form("add_rule"):
         section = st.selectbox(
             "Category",
@@ -233,23 +237,17 @@ with tab_rules:
         submitted = st.form_submit_button("Add rule")
 
         if submitted and match and message:
-            rules_data[section].insert(0, {
+            st.session_state.rules[section].insert(0, {
                 "match": match,
                 "replace_with": replacement or None,
                 "message": message,
                 "case_sensitive": False
             })
-            save_rules(rules_data)
+            save_rules(st.session_state.rules)
             st.rerun()
 
-    action, sec, idx = display_rules("style_guide_rule", rules_data)
-    if not action:
-        action, sec, idx = display_rules("style_guide_caution", rules_data)
-
-    if action == "delete":
-        rules_data[sec].pop(idx)
-        save_rules(rules_data)
-        st.rerun()
+    display_rules("style_guide_rule")
+    display_rules("style_guide_caution")
 
 # -------------------------
 # STYLE CHECKER
@@ -261,8 +259,7 @@ with tab_check:
             tmp.write(uploaded.read())
             path = tmp.name
 
-        rules_data = load_rules()
-        doc, results = analyze_doc(path, rules_data)
+        doc, results = analyze_doc(path)
 
         out = path.replace(".docx", "_checked.docx")
         doc.save(out)
@@ -274,11 +271,9 @@ with tab_check:
         )
 
         st.subheader("📋 Issues found")
-
         grouped = defaultdict(list)
         for r in results:
             grouped[r["paragraph_index"]].append(r)
-
         for p, items in grouped.items():
             st.markdown(f"**Paragraph {p}:** {items[0]['context']}")
             for r in items:
