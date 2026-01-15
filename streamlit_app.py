@@ -30,9 +30,10 @@ except Exception:
 st.set_page_config(page_title="Textile Exchange Style Guide Buddy", layout="wide")
 st.title("📘 Textile Exchange Style Guide Buddy")
 
-# Build stamp for Cloud verification
-BUILD_TAG = "cloud-check 2026-01-15-14:20"
+
+BUILD_TAG = "cloud-check 2026-01-15-15:20"
 st.caption(f"Build: {BUILD_TAG} · Running file: {__file__}")
+
 
 
 # ===========================
