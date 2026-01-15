@@ -1,0 +1,30 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+*.pyo
+*.pyd
+
+# Virtual environments
+venv/
+.env/
+.venv/
+
+# Streamlit secrets
+.streamlit/secrets.toml
+
+# Local rules (optional if you want to keep them private)
+Rules/*.json
+
+# Logs and temp files
+*.log
+*.tmp
+*.DS_Store
+
+# IDE settings
+.vscode/
+.idea/
+
+# OS files
+Thumbs.db
