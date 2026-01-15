@@ -23,18 +23,11 @@ except Exception:
     Credentials = None
     WorksheetNotFound = Exception
 
-
 # ===========================
 # PAGE CONFIG
 # ===========================
 st.set_page_config(page_title="Textile Exchange Style Guide Buddy", layout="wide")
 st.title("📘 Textile Exchange Style Guide Buddy")
-
-
-BUILD_TAG = "cloud-check 2026-01-15-15:20"
-st.caption(f"Build: {BUILD_TAG} · Running file: {__file__}")
-
-
 
 # ===========================
 # RULES STORAGE (SHEETS or LOCAL)
@@ -42,12 +35,6 @@ st.caption(f"Build: {BUILD_TAG} · Running file: {__file__}")
 RULES_FILE = Path("Rules/Textile_Exchange_Style_Guide_STRICT.json")
 
 def _has_service_account_in_secrets() -> bool:
-    """
-    Return True if service account creds are present in ANY supported format:
-    - st.secrets["google_service_account_json"] (preferred JSON string)
-    - st.secrets["google_service_account"] (structured dict)
-    - raw JSON pasted at the secrets root (type=service_account + private_key)
-    """
     try:
         if "google_service_account_json" in st.secrets:
             return True
@@ -86,21 +73,13 @@ def save_rules_local(rules):
 # ---- Google Sheets backend ----
 GS_EXPECTED_COLS = ["category", "match", "replace_with", "message", "case_sensitive", "updated_at"]
 
-# Helpers to load & validate SA from secrets
 def _sa_info_from_secrets() -> dict:
-    """
-    Prefer full JSON string under 'google_service_account_json';
-    else structured dict under 'google_service_account';
-    else treat secrets root as the dict (raw JSON pasted at root).
-    Normalize private_key newlines.
-    """
     if "google_service_account_json" in st.secrets:
         raw = st.secrets["google_service_account_json"]
         sa_info = json.loads(raw)
     elif "google_service_account" in st.secrets:
         sa_info = dict(st.secrets["google_service_account"])
     else:
-        # raw JSON pasted at root of secrets (Cloud sometimes sees this)
         sa_info = dict(st.secrets)
 
     pk = sa_info.get("private_key", "")
@@ -109,7 +88,6 @@ def _sa_info_from_secrets() -> dict:
     return sa_info
 
 def _validate_private_key_pem(pem: str):
-    """Base64-validate PEM body to avoid padding/format errors."""
     if not pem or "BEGIN PRIVATE KEY" not in pem or "END PRIVATE KEY" not in pem:
         raise ValueError("Private key is missing BEGIN/END PRIVATE KEY markers.")
     lines = [ln.strip() for ln in pem.splitlines()]
@@ -122,7 +100,6 @@ def _validate_private_key_pem(pem: str):
 
 @st.cache_resource(show_spinner=False)
 def get_gspread_client():
-    """Create an authorized gspread client; fail fast with clear error if key is malformed."""
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
     try:
         sa_info = _sa_info_from_secrets()
@@ -139,7 +116,6 @@ def get_gspread_client():
 
 @st.cache_resource(show_spinner=False)
 def get_or_create_worksheet():
-    """Open target spreadsheet + worksheet. Create worksheet & header if needed."""
     gc = get_gspread_client()
     sh = gc.open_by_key(st.secrets["gsheets"]["SPREADSHEET_ID"])
     ws_name = st.secrets["gsheets"].get("WORKSHEET_NAME", "rules")
@@ -147,86 +123,13 @@ def get_or_create_worksheet():
         ws = sh.worksheet(ws_name)
     except WorksheetNotFound:
         ws = sh.add_worksheet(title=ws_name, rows=100, cols=10)
-        ws.update("A1", [GS_EXPECTED_COLS])  # header row
+        ws.update("A1", [GS_EXPECTED_COLS])
     return ws
-
-# ===========================
-# SHEETS DIAGNOSTICS (temporary; remove after verifying on Cloud)
-# ===========================
-def _secrets_presence_snapshot():
-    try:
-        has_json_str = "google_service_account_json" in st.secrets
-        has_struct = "google_service_account" in st.secrets
-        has_root = (
-            isinstance(st.secrets.get("type"), str)
-            and st.secrets.get("type") == "service_account"
-            and isinstance(st.secrets.get("client_email"), str)
-            and isinstance(st.secrets.get("private_key"), str)
-        )
-        has_gsheets = "gsheets" in st.secrets
-        has_sheet_id = has_gsheets and ("SPREADSHEET_ID" in st.secrets["gsheets"])
-        return has_json_str, has_struct, has_root, has_gsheets, has_sheet_id
-    except Exception:
-        return False, False, False, False, False
-
-_json_str, _struct, _root, _has_gsheets, _has_id = _secrets_presence_snapshot()
-SHEETS_ENABLED_VAL = bool(globals().get("SHEETS_ENABLED", False))
-
-# Small status line in main content
-st.caption(
-    f"**Sheets mode**: gspread={'✅' if gspread else '❌'} · "
-    f"SA(json)={'✅' if _json_str else '❌'} · SA(dict)={'✅' if _struct else '❌'} · "
-    f"SA(root)={'✅' if _root else '❌'} · gsheets={'✅' if _has_gsheets else '❌'} · "
-    f"sheet_id={'✅' if _has_id else '❌'} · SHEETS_ENABLED={'✅' if SHEETS_ENABLED_VAL else '❌'}"
-)
-
-with st.sidebar.expander("Sheets diagnostics", expanded=False):
-    st.write("gspread import:", gspread is not None)
-    st.write("Has Service Account (json string):", _json_str)
-    st.write("Has Service Account (structured dict):", _struct)
-    st.write("Has Service Account (root fields):", _root)
-    st.write("Has [gsheets] block:", _has_gsheets)
-    st.write("SPREADSHEET_ID present:", _has_id)
-    st.write("SHEETS_ENABLED:", SHEETS_ENABLED_VAL)
-
-    if st.button("Test connection (read)"):
-        try:
-            ws = get_or_create_worksheet()
-            st.success(f"Connected. Worksheet title: {ws.title}")
-            values = ws.get_all_values()
-            st.write("Row count:", len(values))
-            for row in values[:5]:
-                st.code(" | ".join(str(c) for c in row))
-        except Exception as e:
-            st.error(f"Read test failed: {type(e).__name__}: {e}")
-
-    if st.button("Run safe write test (append & remove)"):
-        try:
-            ws = get_or_create_worksheet()
-            from datetime import datetime as _dt
-            probe = ["_diag_probe_", "ok", "", "", False, _dt.utcnow().isoformat(timespec="seconds") + "Z"]
-            ws.append_row(probe)
-            st.success("Append OK. Attempting to remove probe row...")
-            values = ws.get_all_values()
-            last_idx = None
-            for i in range(len(values) - 1, -1, -1):
-                if values[i][:1] == ["_diag_probe_"]:
-                    last_idx = i + 1  # Sheets is 1-based
-                    break
-            if last_idx:
-                ws.delete_rows(last_idx)
-                st.success("Probe row removed successfully.")
-            else:
-                st.warning("Could not find probe row to remove (harmless; delete manually if needed).")
-        except Exception as e:
-            st.error(f"Write test failed: {type(e).__name__}: {e}")
-# ===========================
 
 @st.cache_data(ttl=60, show_spinner=False)
 def load_rules_sheets():
-    """Return same dict structure as local JSON: {style_guide_rule: [...], style_guide_caution: [...]}"""
     ws = get_or_create_worksheet()
-    records = ws.get_all_records()  # list of dicts
+    records = ws.get_all_records()
     out = {"style_guide_rule": [], "style_guide_caution": []}
     for r in records:
         cat = (r.get("category") or "").strip()
@@ -242,7 +145,6 @@ def load_rules_sheets():
     return out
 
 def save_rules_sheets(rules: dict):
-    """Overwrite entire worksheet content with normalized rows."""
     ws = get_or_create_worksheet()
     rows = []
     now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
@@ -330,7 +232,6 @@ def find_matches(text, rules, location, prefix):
     return matches
 
 def render_text(text, matches):
-    """Return HTML string with matched spans highlighted + tooltips."""
     if not matches:
         return html.escape(text)
     out, last = [], 0
@@ -506,7 +407,6 @@ with tab_check:
         )
 
 with tab_rules:
-    # ---- Status / Migrate helper ----
     if SHEETS_ENABLED:
         st.success("Using Google Sheets as the source of truth for rules.")
         local_has_data = any(load_rules_local().values())
@@ -592,9 +492,10 @@ with tab_rules:
                         f"**Case sensitive:** {bool(rule.get('case_sensitive', False))}"
                     )
 
-            with cols[1]:
+with cols[1]:
                 if st.session_state.edit_rule == (cat, idx):
                     if st.button("💾 Save", key=f"save_{cat}_{idx}"):
+                        # Persist edits
                         rule["match"] = new_match
                         rule["replace_with"] = new_repl or None
                         rule["message"] = new_msg
@@ -602,6 +503,7 @@ with tab_rules:
                         save_rules(st.session_state.rules)
                         st.session_state.edit_rule = None
                         st.rerun()
+
                     if st.button("✖ Cancel", key=f"cancel_{cat}_{idx}"):
                         st.session_state.edit_rule = None
                         st.rerun()
@@ -610,8 +512,9 @@ with tab_rules:
                         st.session_state.edit_rule = (cat, idx)
                         st.rerun()
 
-            with cols[2]:
+with cols[2]:
                 if st.button("🗑 Delete", key=f"delete_{cat}_{idx}"):
                     st.session_state.rules[cat].pop(idx)
                     save_rules(st.session_state.rules)
                     st.rerun()
+
