@@ -14,11 +14,8 @@ from docx import Document
 from docx.oxml.text.paragraph import CT_P
 from docx.oxml.table import CT_Tbl
 
-# Optional spell-check dependency
-try:
-    from wordfreq import zipf_frequency
-except Exception:
-    zipf_frequency = None  # spell-check disabled if package not present
+# Optional spell-check dependency (fail fast so you notice if it's missing)
+from wordfreq import zipf_frequency
 
 # Spell-check tuning
 SPELL_ZIPF_THRESHOLD = 3.0  # 3.0 flags obvious misspellings; lower = stricter
@@ -42,6 +39,11 @@ except Exception:
 # ===========================
 st.set_page_config(page_title="Textile Exchange Style Guide Buddy", layout="wide")
 st.title("📘 Textile Exchange Style Guide Buddy")
+
+# (Temporary status for local testing; set to False for production)
+SHOW_SPELLCHECK_STATUS = True
+if SHOW_SPELLCHECK_STATUS:
+    st.caption(f"Spellcheck (wordfreq): {'ACTIVE' if zipf_frequency else 'INACTIVE'} · ZIPF<{SPELL_ZIPF_THRESHOLD}")
 
 # ===========================
 # RULES STORAGE (SHEETS or LOCAL)
@@ -281,19 +283,17 @@ def find_matches(text, rules, location, prefix):
         m["anchor"] = f"{prefix}_m{i}"
     return matches
 
+# --- Wordfreq as RULE BREAKS (US English enforcement) ---
 def find_spelling_suspects(text: str, location: str, prefix: str):
     """
-    Flag low-frequency words as 'style_guide_caution' using wordfreq.zipf_frequency.
-    If wordfreq isn't installed (zipf_frequency is None), this silently does nothing.
+    Flag low-frequency words (wordfreq zipf < threshold) as RULE BREAKS to enforce US English.
     """
-    if zipf_frequency is None:
-        return []
-
-    suspects = []
+    issues = []
     token_re = re.compile(r"[A-Za-z][A-Za-z’'-]*")
     for i, m in enumerate(token_re.finditer(text), 1):
         token = m.group()
 
+        # Guards
         if len(token) < SPELL_MIN_LEN:
             continue
         if any(ch.isdigit() for ch in token):
@@ -301,21 +301,123 @@ def find_spelling_suspects(text: str, location: str, prefix: str):
         if token in SPELL_WHITELIST:
             continue
 
-        freq = zipf_frequency(token.lower(), "en")
+        freq = zipf_frequency(token.lower(), "en")  # US English frequency proxy
         if freq < SPELL_ZIPF_THRESHOLD:
-            suspects.append({
+            issues.append({
                 "start": m.start(),
                 "end": m.end(),
                 "issue": token,
                 "replacement": None,
-                "explanation": "Uncommon word – please check spelling.",
-                "category": "style_guide_caution",
+                "explanation": "Word not recognized as US English",
+                "category": "style_guide_rule",  # RED (rule break)
                 "location": location,
+                "anchor": f"{prefix}_wf{i}",
             })
 
-    for j, s in enumerate(suspects, 1):
-        s["anchor"] = f"{prefix}_sp{j}"
-    return suspects
+    return issues
+
+# ===== UK→US ENFORCEMENT (deterministic) =====
+UK_US_MAP = {
+    "organisation": "organization", "organisations": "organizations",
+    "organisational": "organizational",
+    "colour": "color", "colours": "colors",
+    "flavour": "flavor", "flavours": "flavors",
+    "behaviour": "behavior", "behaviours": "behaviors",
+    "favourite": "favorite", "favourites": "favorites",
+    "neighbour": "neighbor", "neighbours": "neighbors",
+    "neighbourhood": "neighborhood", "neighbourhoods": "neighborhoods",
+    "programme": "program", "programmes": "programs",
+    "catalogue": "catalog", "catalogues": "catalogs",
+    "dialogue": "dialog", "dialogues": "dialogs",
+    "traveller": "traveler", "travellers": "travelers",
+    "modelling": "modeling", "modelled": "modeled",
+    "labour": "labor", "labourers": "laborers",
+    "centre": "center", "centres": "centers",
+    "theatre": "theater", "theatres": "theaters",
+    "metre": "meter", "metres": "meters",
+    "litre": "liter", "litres": "liters",
+    "kilometre": "kilometer", "kilometres": "kilometers",
+    "tonne": "ton",
+    "defence": "defense",
+    "licence": "license", "licences": "licenses",
+    "offence": "offense",
+    "practise": "practice", "practised": "practiced", "practising": "practicing",
+    "grey": "gray",
+    "aluminium": "aluminum",
+    "cheque": "check", "cheques": "checks",
+    "aeroplane": "airplane",
+    "tyre": "tire", "tyres": "tires",
+    "rumour": "rumor", "humour": "humor", "vapour": "vapor", "odour": "odor",
+    "mould": "mold", "moulding": "molding",
+    "jewellery": "jewelry",
+    "storey": "story", "storeys": "stories",
+    "cosy": "cozy",
+}
+
+ISE_EXCEPTIONS = {
+    "advise", "arise", "chastise", "comprise", "compromise", "demise", "devise",
+    "disguise", "enterprise", "exercise", "franchise", "improvise", "merchandise",
+    "paradise", "premise", "precise", "revise", "rise", "surprise", "sunrise",
+    "promise", "advertise",
+}
+
+def _preserve_case(us_replacement: str, original: str) -> str:
+    if original.isupper():
+        return us_replacement.upper()
+    if original[:1].isupper():
+        return us_replacement[:1].upper() + us_replacement[1:]
+    return us_replacement
+
+def _uk_to_us_if_applicable(token: str) -> str | None:
+    base = token.lower()
+
+    # 1) Exact dictionary
+    if base in UK_US_MAP:
+        return _preserve_case(UK_US_MAP[base], token)
+
+    # 2) -our → -or
+    if base.endswith("our") and len(base) > 3:
+        return _preserve_case(base[:-3] + "or", token)
+
+    # 3) -re → -er (conservative families: centre/theatre/metre/litre/kilometre etc.)
+    if base.endswith("re") and len(base) > 2:
+        if re.search(r"(cent|theat|met|litr|kilometr|metr|kilom|centim)re$", base):
+            return _preserve_case(base[:-2] + "er", token)
+
+    # 4) -ise / -ised / -ising → -ize / -ized / -izing (with exceptions)
+    if re.search(r"(?:ise|ised|ising)$", base) and base not in ISE_EXCEPTIONS:
+        return _preserve_case(
+            re.sub(r"ised$", "ized", re.sub(r"ising$", "izing", re.sub(r"ise$", "ize", base))),
+            token
+        )
+
+    # 5) -yse → -yze (analyse→analyze etc.)
+    if re.search(r"(?:alyse|nalyse|paralyse|catalyse|dialyse|electrolyse)$", base):
+        return _preserve_case(re.sub(r"lyse$", "lyze", base), token).replace("alyse", "alyze")
+
+    return None
+
+def find_non_us_words(text: str, location: str, prefix: str):
+    """
+    Scan text for non-US English spellings. Return rule-break issues with US replacements.
+    """
+    issues = []
+    token_re = re.compile(r"[A-Za-z][A-Za-z’'-]*")
+    for i, m in enumerate(token_re.finditer(text), 1):
+        tok = m.group()
+        repl = _uk_to_us_if_applicable(tok)
+        if repl is not None and repl != tok:
+            issues.append({
+                "start": m.start(),
+                "end": m.end(),
+                "issue": tok,
+                "replacement": repl,
+                "explanation": "Use US English spelling.",
+                "category": "style_guide_rule",  # red
+                "location": location,
+                "anchor": f"{prefix}_us{i}",
+            })
+    return issues
 
 # ===========================
 # INLINE CHECKER RENDERING
@@ -369,6 +471,13 @@ def iter_blocks(doc):
             yield "tbl", doc.tables[t_i]
             t_i += 1
 
+def _severity_key(item: dict):
+    """Sort key to place red (rule) above yellow (caution), then by location/start."""
+    # Red first (0), Yellow second (1)
+    sev = 0 if item.get("category") == "style_guide_rule" else 1
+    # Make a stable order within same severity
+    return (sev, str(item.get("location", "")), int(item.get("start", 0)), int(item.get("end", 0)))
+
 def analyze_inline(file_bytes):
     doc = Document(io.BytesIO(file_bytes))
     rules = flatten_rules()
@@ -380,10 +489,16 @@ def analyze_inline(file_bytes):
             para_i += 1
             text = _normalize_for_match(block.text or "")
             loc = f"Paragraph {para_i}"
-            matches = find_matches(text, rules, loc, f"p{para_i}")
-            issues.extend(matches)
-            issues.extend(find_spelling_suspects(text, loc, f"p{para_i}"))
-            left_parts.append(f"<p>{render_text(text, matches) or '&nbsp;'}</p>")
+
+            # Find rules + wordfreq rule-breaks + UK→US rule-breaks and COMBINE for rendering + list
+            rule_matches = find_matches(text, rules, loc, f"p{para_i}")
+            wf_issues = find_spelling_suspects(text, loc, f"p{para_i}")
+            ukus_issues = find_non_us_words(text, loc, f"p{para_i}")
+            combined = sorted(rule_matches + wf_issues + ukus_issues, key=lambda m: (m["start"], m["end"]))
+
+            issues.extend(combined)
+            left_parts.append(f"<p>{render_text(text, combined) or '&nbsp;'}</p>")
+
         else:
             tbl_i += 1
             rows_html = []
@@ -392,10 +507,15 @@ def analyze_inline(file_bytes):
                 for c, cell in enumerate(row.cells, 1):
                     text = _normalize_for_match(cell.text or "")
                     loc = f"Table {tbl_i}, row {r}, col {c}"
-                    matches = find_matches(text, rules, loc, f"t{tbl_i}_{r}_{c}")
-                    issues.extend(matches)
-                    issues.extend(find_spelling_suspects(text, loc, f"t{tbl_i}_{r}_{c}"))
-                    cells.append(f"<td>{render_text(text, matches) or '&nbsp;'}</td>")
+
+                    rule_matches = find_matches(text, rules, loc, f"t{tbl_i}_{r}_{c}")
+                    wf_issues = find_spelling_suspects(text, loc, f"t{tbl_i}_{r}_{c}")
+                    ukus_issues = find_non_us_words(text, loc, f"t{tbl_i}_{r}_{c}")
+                    combined = sorted(rule_matches + wf_issues + ukus_issues, key=lambda m: (m["start"], m["end"]))
+
+                    issues.extend(combined)
+                    cells.append(f"<td>{render_text(text, combined) or '&nbsp;'}</td>")
+
                 rows_html.append(f"<tr>{''.join(cells)}</tr>")
             left_parts.append(
                 f"<table class='doc-table'><tbody>{''.join(rows_html)}</tbody></table>"
@@ -403,8 +523,12 @@ def analyze_inline(file_bytes):
 
     left_html = "".join(left_parts) or "<p>&nbsp;</p>"
 
+    # ----- ORDER ISSUES: red (rule) above yellow (caution) -----
+    issues_sorted = sorted(issues, key=_severity_key)
+
+    # Build right-hand list using the sorted issues
     right_items = []
-    for i in issues:
+    for i in issues_sorted:
         color = "#ff4d4d" if i["category"] == "style_guide_rule" else "#ffcc00"
         card_html = (
             f"<a href=\"#{i['anchor']}\" class=\"issue-card\" data-anchor=\"{i['anchor']}\" "
@@ -485,7 +609,8 @@ def analyze_inline(file_bytes):
     """)
 
     full_html = PAGE_TMPL.substitute(left_html=left_html, right_html=right_html)
-    return full_html, issues
+    # Return the SORTED list so the Summary Table also shows red first
+    return full_html, issues_sorted
 
 # ===========================
 # TABS
@@ -495,7 +620,7 @@ tab_check, tab_rules = st.tabs(["📄 Style Checker", "📋 Add/Edit Rules"])
 with tab_check:
     uploaded = st.file_uploader("Upload Word document (.docx)", type=["docx"])
     if uploaded:
-        page_html, issues = analyze_inline(uploaded.read())
+        page_html, issues = analyze_inline(uploaded.read())  # issues already sorted (red first)
         components.html(page_html, height=720, scrolling=True)
 
         st.subheader("🧾 Summary Table")
@@ -507,7 +632,7 @@ with tab_check:
                     "explanation": i["explanation"],
                     "location": i["location"],
                 }
-                for i in issues
+                for i in issues  # sorted: rule first, then caution
             ],
             use_container_width=True,
         )
