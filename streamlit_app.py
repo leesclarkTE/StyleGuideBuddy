@@ -492,7 +492,8 @@ with tab_rules:
                         f"**Case sensitive:** {bool(rule.get('case_sensitive', False))}"
                     )
 
-with cols[1]:
+
+            with cols[1]:
                 if st.session_state.edit_rule == (cat, idx):
                     if st.button("💾 Save", key=f"save_{cat}_{idx}"):
                         # Persist edits
@@ -512,9 +513,8 @@ with cols[1]:
                         st.session_state.edit_rule = (cat, idx)
                         st.rerun()
 
-with cols[2]:
+            with cols[2]:
                 if st.button("🗑 Delete", key=f"delete_{cat}_{idx}"):
                     st.session_state.rules[cat].pop(idx)
                     save_rules(st.session_state.rules)
                     st.rerun()
-
