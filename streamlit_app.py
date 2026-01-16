@@ -6,12 +6,26 @@ import io
 from pathlib import Path
 from string import Template
 from datetime import datetime
+import unicodedata as _ud
 
 import streamlit as st
 import streamlit.components.v1 as components
 from docx import Document
 from docx.oxml.text.paragraph import CT_P
 from docx.oxml.table import CT_Tbl
+
+# Optional spell-check dependency
+try:
+    from wordfreq import zipf_frequency
+except Exception:
+    zipf_frequency = None  # spell-check disabled if package not present
+
+# Spell-check tuning
+SPELL_ZIPF_THRESHOLD = 3.0  # 3.0 flags obvious misspellings; lower = stricter
+SPELL_MIN_LEN = 3
+SPELL_WHITELIST = {
+    "Textile", "Exchange", "Textile Exchange", "degrowth",
+}
 
 # --- Google Sheets deps ---
 try:
@@ -35,6 +49,12 @@ st.title("📘 Textile Exchange Style Guide Buddy")
 RULES_FILE = Path("Rules/Textile_Exchange_Style_Guide_STRICT.json")
 
 def _has_service_account_in_secrets() -> bool:
+    """
+    Detect SA creds in supported formats:
+    - st.secrets['google_service_account_json'] (full JSON string)
+    - st.secrets['google_service_account'] (dict)
+    - raw at root (type=service_account + private_key + client_email)
+    """
     try:
         if "google_service_account_json" in st.secrets:
             return True
@@ -58,7 +78,7 @@ SHEETS_ENABLED = (
 )
 
 # ---- Local JSON fallback ----
-def load_rules_local():
+def load_rules_local() -> dict:
     if RULES_FILE.exists():
         data = json.loads(RULES_FILE.read_text(encoding="utf-8"))
         data.setdefault("style_guide_rule", [])
@@ -66,7 +86,7 @@ def load_rules_local():
         return data
     return {"style_guide_rule": [], "style_guide_caution": []}
 
-def save_rules_local(rules):
+def save_rules_local(rules: dict):
     RULES_FILE.parent.mkdir(exist_ok=True, parents=True)
     RULES_FILE.write_text(json.dumps(rules, indent=2, ensure_ascii=False), encoding="utf-8")
 
@@ -74,13 +94,19 @@ def save_rules_local(rules):
 GS_EXPECTED_COLS = ["category", "match", "replace_with", "message", "case_sensitive", "updated_at"]
 
 def _sa_info_from_secrets() -> dict:
+    """
+    Prefer full JSON string under 'google_service_account_json';
+    else structured dict under 'google_service_account';
+    else treat secrets root as dict (raw-at-root).
+    Normalize private_key newlines.
+    """
     if "google_service_account_json" in st.secrets:
         raw = st.secrets["google_service_account_json"]
         sa_info = json.loads(raw)
     elif "google_service_account" in st.secrets:
         sa_info = dict(st.secrets["google_service_account"])
     else:
-        sa_info = dict(st.secrets)
+        sa_info = dict(st.secrets)  # raw at root
 
     pk = sa_info.get("private_key", "")
     if "BEGIN PRIVATE KEY" in pk:
@@ -88,6 +114,7 @@ def _sa_info_from_secrets() -> dict:
     return sa_info
 
 def _validate_private_key_pem(pem: str):
+    """Base64-validate PEM body to avoid padding/format errors."""
     if not pem or "BEGIN PRIVATE KEY" not in pem or "END PRIVATE KEY" not in pem:
         raise ValueError("Private key is missing BEGIN/END PRIVATE KEY markers.")
     lines = [ln.strip() for ln in pem.splitlines()]
@@ -100,6 +127,7 @@ def _validate_private_key_pem(pem: str):
 
 @st.cache_resource(show_spinner=False)
 def get_gspread_client():
+    """Create an authorized gspread client; fail fast with clear error if key is malformed."""
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
     try:
         sa_info = _sa_info_from_secrets()
@@ -116,6 +144,7 @@ def get_gspread_client():
 
 @st.cache_resource(show_spinner=False)
 def get_or_create_worksheet():
+    """Open target spreadsheet + worksheet. Create worksheet & header if needed."""
     gc = get_gspread_client()
     sh = gc.open_by_key(st.secrets["gsheets"]["SPREADSHEET_ID"])
     ws_name = st.secrets["gsheets"].get("WORKSHEET_NAME", "rules")
@@ -123,13 +152,14 @@ def get_or_create_worksheet():
         ws = sh.worksheet(ws_name)
     except WorksheetNotFound:
         ws = sh.add_worksheet(title=ws_name, rows=100, cols=10)
-        ws.update("A1", [GS_EXPECTED_COLS])
+        ws.update("A1", [GS_EXPECTED_COLS])  # header row
     return ws
 
 @st.cache_data(ttl=60, show_spinner=False)
-def load_rules_sheets():
+def load_rules_sheets() -> dict:
+    """Return dict structure: {style_guide_rule: [...], style_guide_caution: [...]}"""
     ws = get_or_create_worksheet()
-    records = ws.get_all_records()
+    records = ws.get_all_records()  # list of dicts
     out = {"style_guide_rule": [], "style_guide_caution": []}
     for r in records:
         cat = (r.get("category") or "").strip()
@@ -145,6 +175,7 @@ def load_rules_sheets():
     return out
 
 def save_rules_sheets(rules: dict):
+    """Overwrite entire worksheet content with normalized rows."""
     ws = get_or_create_worksheet()
     rows = []
     now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
@@ -166,7 +197,7 @@ def save_rules_sheets(rules: dict):
     except Exception:
         pass
 
-def load_rules():
+def load_rules() -> dict:
     if SHEETS_ENABLED:
         try:
             return load_rules_sheets()
@@ -185,28 +216,35 @@ def save_rules(rules: dict):
     save_rules_local(rules)
 
 # ===========================
-# SESSION STATE
+# SESSION STATE (robust init)
 # ===========================
-if "rules" not in st.session_state:
-    st.session_state.rules = load_rules()
-if "edit_rule" not in st.session_state:
-    st.session_state.edit_rule = None
+def ensure_state():
+    if "rules" not in st.session_state:
+        st.session_state.rules = load_rules()
+    if "edit_rule" not in st.session_state:
+        st.session_state.edit_rule = None
+
+# Initialize immediately (prevents AttributeError on first render)
+ensure_state()
 
 # ===========================
-# INLINE CHECKER
+# MATCHING & SPELL-CHECK HELPERS
 # ===========================
-HIGHLIGHT_STYLE = {
-    "style_guide_rule": "border-bottom:2px solid #ff4d4d;",
-    "style_guide_caution": "border-bottom:2px solid #ffcc00;",
-}
+def _normalize_for_match(s: str) -> str:
+    """
+    Normalize text for pattern matching:
+    - Unescape HTML entities (&amp; → &)
+    - Unicode normalize (smart quotes, accents) to NFC
+    """
+    if not s:
+        return ""
+    s = html.unescape(s)
+    s = _ud.normalize("NFC", s)
+    return s
 
-def flatten_rules():
-    out = []
-    for cat in ("style_guide_rule", "style_guide_caution"):
-        for r in st.session_state.rules.get(cat, []):
-            if r.get("match"):
-                out.append({**r, "category": cat})
-    return out
+def _needs_word_boundaries(token: str) -> bool:
+    # Pure word tokens (letters/digits; allow inner apostrophes/hyphens) use \b ... \b
+    return re.fullmatch(r"[A-Za-z0-9]+(?:['’-][A-Za-z0-9]+)*", token) is not None
 
 def find_matches(text, rules, location, prefix):
     matches = []
@@ -215,7 +253,18 @@ def find_matches(text, rules, location, prefix):
         if not word:
             continue
         flags = 0 if rule.get("case_sensitive") else re.IGNORECASE
-        pattern = rf"\b{re.escape(word)}\b"
+
+        # Opt-in regex: enter /.../ in 'match' to use raw regex
+        use_regex = isinstance(word, str) and len(word) >= 2 and word.startswith("/") and word.endswith("/")
+        if use_regex:
+            pattern = word[1:-1]  # strip slashes
+        else:
+            if _needs_word_boundaries(word):
+                pattern = rf"\b{re.escape(word)}\b"
+            else:
+                # For symbols/punctuation like '&', do not force word boundaries
+                pattern = re.escape(word)
+
         for m in re.finditer(pattern, text, flags):
             matches.append({
                 "start": m.start(),
@@ -226,12 +275,67 @@ def find_matches(text, rules, location, prefix):
                 "category": rule["category"],
                 "location": location,
             })
+
     matches.sort(key=lambda x: (x["start"], x["end"]))
     for i, m in enumerate(matches, 1):
         m["anchor"] = f"{prefix}_m{i}"
     return matches
 
+def find_spelling_suspects(text: str, location: str, prefix: str):
+    """
+    Flag low-frequency words as 'style_guide_caution' using wordfreq.zipf_frequency.
+    If wordfreq isn't installed (zipf_frequency is None), this silently does nothing.
+    """
+    if zipf_frequency is None:
+        return []
+
+    suspects = []
+    token_re = re.compile(r"[A-Za-z][A-Za-z’'-]*")
+    for i, m in enumerate(token_re.finditer(text), 1):
+        token = m.group()
+
+        if len(token) < SPELL_MIN_LEN:
+            continue
+        if any(ch.isdigit() for ch in token):
+            continue
+        if token in SPELL_WHITELIST:
+            continue
+
+        freq = zipf_frequency(token.lower(), "en")
+        if freq < SPELL_ZIPF_THRESHOLD:
+            suspects.append({
+                "start": m.start(),
+                "end": m.end(),
+                "issue": token,
+                "replacement": None,
+                "explanation": "Uncommon word – please check spelling.",
+                "category": "style_guide_caution",
+                "location": location,
+            })
+
+    for j, s in enumerate(suspects, 1):
+        s["anchor"] = f"{prefix}_sp{j}"
+    return suspects
+
+# ===========================
+# INLINE CHECKER RENDERING
+# ===========================
+HIGHLIGHT_STYLE = {
+    "style_guide_rule": "border-bottom:2px solid #ff4d4d;",
+    "style_guide_caution": "border-bottom:2px solid #ffcc00;",
+}
+
+def flatten_rules():
+    rules_state = st.session_state.get("rules", {"style_guide_rule": [], "style_guide_caution": []})
+    out = []
+    for cat in ("style_guide_rule", "style_guide_caution"):
+        for r in rules_state.get(cat, []):
+            if r.get("match"):
+                out.append({**r, "category": cat})
+    return out
+
 def render_text(text, matches):
+    """Return HTML string with matched spans highlighted + tooltips."""
     if not matches:
         return html.escape(text)
     out, last = [], 0
@@ -274,10 +378,11 @@ def analyze_inline(file_bytes):
     for kind, block in iter_blocks(doc):
         if kind == "p":
             para_i += 1
-            text = block.text or ""
+            text = _normalize_for_match(block.text or "")
             loc = f"Paragraph {para_i}"
             matches = find_matches(text, rules, loc, f"p{para_i}")
             issues.extend(matches)
+            issues.extend(find_spelling_suspects(text, loc, f"p{para_i}"))
             left_parts.append(f"<p>{render_text(text, matches) or '&nbsp;'}</p>")
         else:
             tbl_i += 1
@@ -285,10 +390,11 @@ def analyze_inline(file_bytes):
             for r, row in enumerate(block.rows, 1):
                 cells = []
                 for c, cell in enumerate(row.cells, 1):
-                    text = cell.text or ""
+                    text = _normalize_for_match(cell.text or "")
                     loc = f"Table {tbl_i}, row {r}, col {c}"
                     matches = find_matches(text, rules, loc, f"t{tbl_i}_{r}_{c}")
                     issues.extend(matches)
+                    issues.extend(find_spelling_suspects(text, loc, f"t{tbl_i}_{r}_{c}"))
                     cells.append(f"<td>{render_text(text, matches) or '&nbsp;'}</td>")
                 rows_html.append(f"<tr>{''.join(cells)}</tr>")
             left_parts.append(
@@ -407,6 +513,8 @@ with tab_check:
         )
 
 with tab_rules:
+    ensure_state()  # safety on reruns
+
     if SHEETS_ENABLED:
         st.success("Using Google Sheets as the source of truth for rules.")
         local_has_data = any(load_rules_local().values())
@@ -447,7 +555,8 @@ with tab_rules:
         submitted = st.form_submit_button("Add rule")
 
         if submitted and match and message:
-            st.session_state.rules.setdefault(category, []).insert(
+            rules_state = st.session_state.get("rules", {"style_guide_rule": [], "style_guide_caution": []})
+            rules_state.setdefault(category, []).insert(
                 0,
                 {
                     "match": match,
@@ -456,6 +565,7 @@ with tab_rules:
                     "case_sensitive": case_sensitive,
                 },
             )
+            st.session_state.rules = rules_state
             save_rules(st.session_state.rules)
             st.success("Rule added successfully.")
             st.rerun()
@@ -466,7 +576,8 @@ with tab_rules:
     for cat in ("style_guide_rule", "style_guide_caution"):
         st.markdown(f"### {cat.replace('_', ' ').title()}")
 
-        rules_list = st.session_state.rules.get(cat, [])
+        rules_state = st.session_state.get("rules", {"style_guide_rule": [], "style_guide_caution": []})
+        rules_list = rules_state.get(cat, [])
         if not rules_list:
             st.info("No rules in this category yet.")
             continue
@@ -474,6 +585,7 @@ with tab_rules:
         for idx, rule in enumerate(rules_list):
             cols = st.columns([5, 2, 1])
 
+            # Column 0: read-only view or edit inputs
             with cols[0]:
                 if st.session_state.edit_rule == (cat, idx):
                     new_match = st.text_input("Match", rule["match"], key=f"edit_match_{cat}_{idx}")
@@ -492,19 +604,18 @@ with tab_rules:
                         f"**Case sensitive:** {bool(rule.get('case_sensitive', False))}"
                     )
 
-
+            # Column 1: edit/save/cancel or 'Edit'
             with cols[1]:
                 if st.session_state.edit_rule == (cat, idx):
                     if st.button("💾 Save", key=f"save_{cat}_{idx}"):
-                        # Persist edits
                         rule["match"] = new_match
                         rule["replace_with"] = new_repl or None
                         rule["message"] = new_msg
                         rule["case_sensitive"] = bool(new_cs)
+                        st.session_state.rules = rules_state
                         save_rules(st.session_state.rules)
                         st.session_state.edit_rule = None
                         st.rerun()
-
                     if st.button("✖ Cancel", key=f"cancel_{cat}_{idx}"):
                         st.session_state.edit_rule = None
                         st.rerun()
@@ -513,8 +624,10 @@ with tab_rules:
                         st.session_state.edit_rule = (cat, idx)
                         st.rerun()
 
+            # Column 2: delete
             with cols[2]:
                 if st.button("🗑 Delete", key=f"delete_{cat}_{idx}"):
-                    st.session_state.rules[cat].pop(idx)
+                    rules_state[cat].pop(idx)
+                    st.session_state.rules = rules_state
                     save_rules(st.session_state.rules)
                     st.rerun()
