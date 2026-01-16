@@ -79,12 +79,28 @@ SHEETS_ENABLED = (
     and "SPREADSHEET_ID" in st.secrets["gsheets"]
 )
 
+# ---------- Boolean coercion to fix Sheets "False" → True bug ----------
+def _coerce_bool(v) -> bool:
+    """Convert common sheet/JSON representations to a proper boolean."""
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float)):
+        return v != 0
+    if isinstance(v, str):
+        s = v.strip().lower()
+        return s in ("true", "t", "yes", "y", "1", "on")
+    return False
+
 # ---- Local JSON fallback ----
 def load_rules_local() -> dict:
     if RULES_FILE.exists():
         data = json.loads(RULES_FILE.read_text(encoding="utf-8"))
         data.setdefault("style_guide_rule", [])
         data.setdefault("style_guide_caution", [])
+        # Coerce booleans for local entries too (hygiene)
+        for cat in ("style_guide_rule", "style_guide_caution"):
+            for it in data.get(cat, []):
+                it["case_sensitive"] = _coerce_bool(it.get("case_sensitive"))
         return data
     return {"style_guide_rule": [], "style_guide_caution": []}
 
@@ -171,7 +187,7 @@ def load_rules_sheets() -> dict:
             "match": r.get("match") or "",
             "replace_with": r.get("replace_with") or None,
             "message": r.get("message") or "",
-            "case_sensitive": bool(r.get("case_sensitive")) if r.get("case_sensitive") not in (None, "") else False,
+            "case_sensitive": _coerce_bool(r.get("case_sensitive")),
         }
         out[cat].append(item)
     return out
@@ -235,7 +251,7 @@ ensure_state()
 def _normalize_for_match(s: str) -> str:
     """
     Normalize text for pattern matching:
-    - Unescape HTML entities (&amp; → &)
+    - Unescape HTML entities (& → &)
     - Unicode normalize (smart quotes, accents) to NFC
     """
     if not s:
@@ -307,7 +323,7 @@ def find_spelling_suspects(text: str, location: str, prefix: str):
                 "start": m.start(),
                 "end": m.end(),
                 "issue": token,
-                "replacement": None,
+                "replacement": None,  # add Sheet rules for known fixes (e.g., companys→companies)
                 "explanation": "Word not recognized as US English",
                 "category": "style_guide_rule",  # RED (rule break)
                 "location": location,
@@ -473,9 +489,7 @@ def iter_blocks(doc):
 
 def _severity_key(item: dict):
     """Sort key to place red (rule) above yellow (caution), then by location/start."""
-    # Red first (0), Yellow second (1)
     sev = 0 if item.get("category") == "style_guide_rule" else 1
-    # Make a stable order within same severity
     return (sev, str(item.get("location", "")), int(item.get("start", 0)), int(item.get("end", 0)))
 
 def analyze_inline(file_bytes):
@@ -638,6 +652,21 @@ with tab_check:
         )
 
 with tab_rules:
+    # ---------- Reload rules button (clears cache + refreshes session rules) ----------
+    def _reload_rules():
+        try:
+            load_rules_sheets.clear()
+        except Exception:
+            pass
+        st.session_state.rules = load_rules()
+    st.button(
+        "↻ Reload rules from source",
+        help="Clear cache and reload from Google Sheets (or local JSON).",
+        on_click=_reload_rules,
+        type="secondary",
+        use_container_width=False,
+    )
+
     ensure_state()  # safety on reruns
 
     if SHEETS_ENABLED:
@@ -718,7 +747,7 @@ with tab_rules:
                     new_msg = st.text_input("Message", rule["message"], key=f"edit_msg_{cat}_{idx}")
                     new_cs = st.checkbox(
                         "Case sensitive",
-                        value=bool(rule.get("case_sensitive", False)),
+                        value=_coerce_bool(rule.get("case_sensitive", False)),
                         key=f"edit_cs_{cat}_{idx}",
                     )
                 else:
@@ -726,7 +755,7 @@ with tab_rules:
                         f"**Match:** `{rule['match']}`  \n"
                         f"**Replacement:** {rule.get('replace_with') or '—'}  \n"
                         f"**Message:** {rule['message']}  \n"
-                        f"**Case sensitive:** {bool(rule.get('case_sensitive', False))}"
+                        f"**Case sensitive:** {_coerce_bool(rule.get('case_sensitive', False))}"
                     )
 
             # Column 1: edit/save/cancel or 'Edit'
