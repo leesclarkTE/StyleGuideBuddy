@@ -791,6 +791,27 @@ def analyze_inline(file_bytes):
 # ===========================
 # TABS
 # ===========================
+
+
+with st.expander("Debug: Test Google Sheets connection (temporary)"):
+    if st.button("Run Sheets connection test"):
+        try:
+            gc = get_gspread_client()
+            st.success("Auth OK with Google.")
+            sh = gc.open_by_key(st.secrets["gsheets"]["SPREADSHEET_ID"])
+            st.success(f"Opened spreadsheet: {sh.title}")
+            ws_name = st.secrets["gsheets"].get("WORKSHEET_NAME", "rules")
+            try:
+                ws = sh.worksheet(ws_name)
+                st.success(f"Worksheet exists: {ws_name}")
+            except WorksheetNotFound:
+                st.warning(f"Worksheet `{ws_name}` not found; will be created by app if needed.")
+            st.info("CAPS whitelist tab name: " + CAPS_WS_NAME)
+        except Exception as e:
+            st.error("Google Sheets connection failed:")
+            st.exception(e)
+
+
 tab_check, tab_rules = st.tabs(["📄 Style Checker", "📋 Add/Edit Rules"])
 
 with tab_check:
