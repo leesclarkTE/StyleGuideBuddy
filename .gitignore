@@ -11,8 +11,22 @@ venv/
 .env/
 .venv/
 
-# Streamlit secrets
+
+# Streamlit / secrets
 .streamlit/secrets.toml
+.streamlit/*.save
+# Common creds formats
+*.pem
+*.key
+*.p12
+*.pfx
+*.cer
+*.crt
+*.der
+*.jks
+*.env
+.env*
+
 
 # Local rules (optional if you want to keep them private)
 Rules/*.json
