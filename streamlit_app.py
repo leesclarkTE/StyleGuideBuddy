@@ -206,6 +206,38 @@ def save_caps_whitelist_local(acros: set[str]):
     RULES_DIR.mkdir(exist_ok=True, parents=True)
     CAPS_FILE.write_text(json.dumps(sorted(acros), indent=2, ensure_ascii=False), encoding="utf-8")
 
+# ---- PEM canonicalizer (NEW) ----
+def _canonicalize_pem(pem: str) -> str:
+    """
+    Rebuild a well-formed PKCS#8 PEM from whatever was pasted:
+    - Keep BEGIN/END lines
+    - Strip non-base64 junk
+    - Re-wrap base64 to 64-char lines
+    - Fix padding if the length mod 4 is off
+    """
+    if not pem or "BEGIN PRIVATE KEY" not in pem or "END PRIVATE KEY" not in pem:
+        return pem
+
+    import re, textwrap
+    pem = pem.replace("\r\n", "\n").replace("\r", "\n")
+    lines = [ln.strip() for ln in pem.splitlines()]
+
+    header = "-----BEGIN PRIVATE KEY-----"
+    footer = "-----END PRIVATE KEY-----"
+
+    # Pull out base64 body lines (everything not header/footer and not empty)
+    body = "".join(ln for ln in lines if ln and ln != header and ln != footer)
+    # Remove anything that's not base64 alphabet or padding
+    body = re.sub(r"[^A-Za-z0-9+/=]", "", body)
+
+    # Fix padding if required
+    rem = len(body) % 4
+    if rem:
+        body += "=" * (4 - rem)
+
+    wrapped = "\n".join(textwrap.wrap(body, 64))
+    return f"{header}\n{wrapped}\n{footer}\n"
+
 # ---- Google Sheets: auth helpers ----
 GS_EXPECTED_COLS = ["category", "match", "replace_with", "message", "case_sensitive", "updated_at"]
 
@@ -220,7 +252,10 @@ def _sa_info_from_secrets() -> dict:
 
     pk = sa_info.get("private_key", "")
     if "BEGIN PRIVATE KEY" in pk:
+        # normalize newline escapes -> real newlines
         sa_info["private_key"] = pk.replace("\\n", "\n").replace("\r\n", "\n").replace("\r", "\n")
+        # canonicalize (NEW)
+        sa_info["private_key"] = _canonicalize_pem(sa_info["private_key"])
     return sa_info
 
 
@@ -812,27 +847,6 @@ def analyze_inline(file_bytes):
 # ===========================
 # TABS
 # ===========================
-
-
-with st.expander("Debug: Test Google Sheets connection (temporary)"):
-    if st.button("Run Sheets connection test"):
-        try:
-            gc = get_gspread_client()
-            st.success("Auth OK with Google.")
-            sh = gc.open_by_key(st.secrets["gsheets"]["SPREADSHEET_ID"])
-            st.success(f"Opened spreadsheet: {sh.title}")
-            ws_name = st.secrets["gsheets"].get("WORKSHEET_NAME", "rules")
-            try:
-                ws = sh.worksheet(ws_name)
-                st.success(f"Worksheet exists: {ws_name}")
-            except WorksheetNotFound:
-                st.warning(f"Worksheet `{ws_name}` not found; will be created by app if needed.")
-            st.info("CAPS whitelist tab name: " + CAPS_WS_NAME)
-        except Exception as e:
-            st.error("Google Sheets connection failed:")
-            st.exception(e)
-
-
 tab_check, tab_rules = st.tabs(["📄 Style Checker", "📋 Add/Edit Rules"])
 
 with tab_check:
