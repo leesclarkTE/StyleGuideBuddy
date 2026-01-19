@@ -7,6 +7,7 @@ from pathlib import Path
 from string import Template
 from datetime import datetime
 import unicodedata as _ud
+from typing import Any
 
 import streamlit as st
 import streamlit.components.v1 as components
@@ -14,25 +15,43 @@ from docx import Document
 from docx.oxml.text.paragraph import CT_P
 from docx.oxml.table import CT_Tbl
 
-# Optional spell-check dependency (fail fast so you notice if it's missing)
-from wordfreq import zipf_frequency
+# --- PATHS (make path bullet-proof) ---
+APP_DIR = Path(__file__).resolve().parent
+DICT_DIR = APP_DIR / "dictionaries" / "en_US"   # expects en_US.aff + en_US.dic
+
+# ===========================
+# US DICTIONARY (PURE PYTHON)
+# ===========================
+# We use spylls (pure Python Hunspell implementation) to avoid native build deps.
+try:
+    from spylls.hunspell import Dictionary
+except Exception:
+    Dictionary = None  # we'll handle gracefully below
+
+# Toggle loader debug messages in the UI (set to False for production)
+DEBUG_DICT_LOAD = True  # <-- set to False after you see "loaded successfully"
 
 # Spell-check tuning
-SPELL_ZIPF_THRESHOLD = 3.0  # 3.0 flags obvious misspellings; lower = stricter
 SPELL_MIN_LEN = 3
 SPELL_WHITELIST = {
     "Textile", "Exchange", "Textile Exchange", "degrowth",
 }
 
-# --- Google Sheets deps ---
+# --- Google Sheets deps (robust, Pylance-friendly) ---
+gspread: Any = None
+Credentials: Any = None
+WorksheetNotFound: type[Exception] = Exception
 try:
-    import gspread
-    from google.oauth2.service_account import Credentials
-    from gspread.exceptions import WorksheetNotFound
+    import gspread as _gspread
+    from google.oauth2.service_account import Credentials as _Credentials
+    from gspread.exceptions import WorksheetNotFound as _WorksheetNotFound
+
+    gspread = _gspread
+    Credentials = _Credentials
+    WorksheetNotFound = _WorksheetNotFound
 except Exception:
-    gspread = None
-    Credentials = None
-    WorksheetNotFound = Exception
+    # Leave fallbacks (no-op local mode)
+    pass
 
 # ===========================
 # PAGE CONFIG
@@ -40,10 +59,87 @@ except Exception:
 st.set_page_config(page_title="Textile Exchange Style Guide Buddy", layout="wide")
 st.title("📘 Textile Exchange Style Guide Buddy")
 
+# ===========================
+# US DICTIONARY LOADER (cache-safe)
+# ===========================
+def _dict_cache_key() -> tuple:
+    """
+    Build a cache key from the existence/size/mtime of the dict files.
+    Any change to files will bust the cache for get_us_dictionary().
+    """
+    aff = DICT_DIR / "en_US.aff"
+    dic = DICT_DIR / "en_US.dic"
+
+    def _meta(p: Path):
+        try:
+            return (
+                p.exists(),
+                p.stat().st_size if p.exists() else 0,
+                int(p.stat().st_mtime) if p.exists() else 0,
+            )
+        except Exception:
+            return (False, 0, 0)
+
+    return _meta(aff) + _meta(dic)
+
+@st.cache_resource(show_spinner=False)
+def get_us_dictionary(cache_key: tuple):
+    """
+    Load the Hunspell en_US dictionary via spylls.
+    Returns a Dictionary or None. Emits debug on failure when DEBUG_DICT_LOAD=True.
+    NOTE: cache_key is not used inside; Streamlit uses it to invalidate the cache.
+    """
+    if Dictionary is None:
+        if DEBUG_DICT_LOAD:
+            st.error("spylls import failed: `from spylls.hunspell import Dictionary` returned None.")
+        return None
+
+    try:
+        aff = DICT_DIR / "en_US.aff"
+        dic = DICT_DIR / "en_US.dic"
+
+        if DEBUG_DICT_LOAD:
+            st.info(f"DEBUG: aff={aff} (exists={aff.exists()}, size={aff.stat().st_size if aff.exists() else '—'})")
+            st.info(f"DEBUG: dic={dic} (exists={dic.exists()}, size={dic.stat().st_size if dic.exists() else '—'})")
+            st.info(f"DEBUG: cache_key={cache_key}")
+
+        if not (aff.exists() and dic.exists()):
+            if DEBUG_DICT_LOAD:
+                st.error("Dictionary files not found at expected locations.")
+            return None
+
+        d = Dictionary.from_files(aff, dic)   # will raise if parsing fails
+        if DEBUG_DICT_LOAD:
+            st.success("DEBUG: spylls Dictionary loaded successfully.")
+        return d
+
+    except Exception as e:
+        if DEBUG_DICT_LOAD:
+            st.exception(e)  # show full traceback in the app
+        return None
+
+# --- IMPORTANT: define US_DICT *before* any code that references it ---
+US_DICT = get_us_dictionary(_dict_cache_key())
+
 # (Temporary status for local testing; set to False for production)
 SHOW_SPELLCHECK_STATUS = True
 if SHOW_SPELLCHECK_STATUS:
-    st.caption(f"Spellcheck (wordfreq): {'ACTIVE' if zipf_frequency else 'INACTIVE'} · ZIPF<{SPELL_ZIPF_THRESHOLD}")
+    status = "ACTIVE" if US_DICT else "INACTIVE (missing dictionaries)"
+    st.caption(f"Spellcheck (spylls en_US): {status}")
+
+# Manual reload button to clear the resource cache and rebuild (no rerun call needed)
+if st.button("♻ Reload US dictionary", type="secondary"):
+    try:
+        get_us_dictionary.clear()  # clear the cached resource
+        st.toast("US dictionary cache cleared. Rebuilding…")
+    except Exception:
+        pass
+    # Streamlit will rerun automatically after the button click.
+
+# Nice-to-have: surface a banner if dict files are missing
+if SHOW_SPELLCHECK_STATUS and not US_DICT:
+    st.warning("US dictionary files not found at `dictionaries/en_US/`. "
+               "Spellcheck is disabled until `en_US.aff` and `en_US.dic` are present.")
 
 # ===========================
 # RULES STORAGE (SHEETS or LOCAL)
@@ -73,13 +169,13 @@ def _has_service_account_in_secrets() -> bool:
         return False
 
 SHEETS_ENABLED = (
-    gspread is not None
+    (gspread is not None)
     and _has_service_account_in_secrets()
     and "gsheets" in st.secrets
     and "SPREADSHEET_ID" in st.secrets["gsheets"]
 )
 
-# ---------- Boolean coercion to fix Sheets "False" → True bug ----------
+# ---------- Boolean coercion ----------
 def _coerce_bool(v) -> bool:
     """Convert common sheet/JSON representations to a proper boolean."""
     if isinstance(v, bool):
@@ -146,6 +242,8 @@ def _validate_private_key_pem(pem: str):
 @st.cache_resource(show_spinner=False)
 def get_gspread_client():
     """Create an authorized gspread client; fail fast with clear error if key is malformed."""
+    if gspread is None or Credentials is None:
+        raise RuntimeError("Google Sheets dependencies are not installed in this environment.")
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
     try:
         sa_info = _sa_info_from_secrets()
@@ -163,6 +261,8 @@ def get_gspread_client():
 @st.cache_resource(show_spinner=False)
 def get_or_create_worksheet():
     """Open target spreadsheet + worksheet. Create worksheet & header if needed."""
+    if gspread is None:
+        raise RuntimeError("gspread is not available.")
     gc = get_gspread_client()
     sh = gc.open_by_key(st.secrets["gsheets"]["SPREADSHEET_ID"])
     ws_name = st.secrets["gsheets"].get("WORKSHEET_NAME", "rules")
@@ -299,39 +399,6 @@ def find_matches(text, rules, location, prefix):
         m["anchor"] = f"{prefix}_m{i}"
     return matches
 
-# --- Wordfreq as RULE BREAKS (US English enforcement) ---
-def find_spelling_suspects(text: str, location: str, prefix: str):
-    """
-    Flag low-frequency words (wordfreq zipf < threshold) as RULE BREAKS to enforce US English.
-    """
-    issues = []
-    token_re = re.compile(r"[A-Za-z][A-Za-z’'-]*")
-    for i, m in enumerate(token_re.finditer(text), 1):
-        token = m.group()
-
-        # Guards
-        if len(token) < SPELL_MIN_LEN:
-            continue
-        if any(ch.isdigit() for ch in token):
-            continue
-        if token in SPELL_WHITELIST:
-            continue
-
-        freq = zipf_frequency(token.lower(), "en")  # US English frequency proxy
-        if freq < SPELL_ZIPF_THRESHOLD:
-            issues.append({
-                "start": m.start(),
-                "end": m.end(),
-                "issue": token,
-                "replacement": None,  # add Sheet rules for known fixes (e.g., companys→companies)
-                "explanation": "Word not recognized as US English",
-                "category": "style_guide_rule",  # RED (rule break)
-                "location": location,
-                "anchor": f"{prefix}_wf{i}",
-            })
-
-    return issues
-
 # ===== UK→US ENFORCEMENT (deterministic) =====
 UK_US_MAP = {
     "organisation": "organization", "organisations": "organizations",
@@ -435,6 +502,62 @@ def find_non_us_words(text: str, location: str, prefix: str):
             })
     return issues
 
+def find_non_dictionary_words(text: str, location: str, prefix: str):
+    """
+    Flag words not present in the US dictionary (spylls + Hunspell en_US).
+    Returns 'style_guide_rule' issues (red underline).
+    """
+    issues = []
+    if not US_DICT:
+        return issues
+
+    token_re = re.compile(r"[A-Za-z][A-Za-z’'-]*")
+    i = 0
+
+    for m in token_re.finditer(text):
+        token = m.group()
+        base = token.strip()
+
+        # Guards
+        if len(base) < SPELL_MIN_LEN:
+            continue
+        if any(ch.isdigit() for ch in base):
+            continue
+        if base in SPELL_WHITELIST:
+            continue
+
+        # spylls: consider a word valid if lookup returns analyses for any casing
+        def _ok(w: str) -> bool:
+            try:
+                return bool(US_DICT.lookup(w))
+            except Exception:
+                return False
+
+        if not (_ok(base) or _ok(base.lower()) or _ok(base.capitalize())):
+            i += 1
+            # Optional: top-3 suggestions in tooltip
+            suggestions = []
+            try:
+                suggestions = US_DICT.suggest(base)[:3]
+            except Exception:
+                suggestions = []
+            expl = "Word not in US English dictionary"
+            if suggestions:
+                expl += f" (e.g., {', '.join(suggestions)})"
+
+            issues.append({
+                "start": m.start(),
+                "end": m.end(),
+                "issue": token,
+                "replacement": None,
+                "explanation": expl,
+                "category": "style_guide_rule",
+                "location": location,
+                "anchor": f"{prefix}_dict{i}",
+            })
+
+    return issues
+
 # ===========================
 # INLINE CHECKER RENDERING
 # ===========================
@@ -504,11 +627,11 @@ def analyze_inline(file_bytes):
             text = _normalize_for_match(block.text or "")
             loc = f"Paragraph {para_i}"
 
-            # Find rules + wordfreq rule-breaks + UK→US rule-breaks and COMBINE for rendering + list
+            # Combine: rules + dictionary membership + UK→US conversions
             rule_matches = find_matches(text, rules, loc, f"p{para_i}")
-            wf_issues = find_spelling_suspects(text, loc, f"p{para_i}")
+            dict_issues = find_non_dictionary_words(text, loc, f"p{para_i}")
             ukus_issues = find_non_us_words(text, loc, f"p{para_i}")
-            combined = sorted(rule_matches + wf_issues + ukus_issues, key=lambda m: (m["start"], m["end"]))
+            combined = sorted(rule_matches + dict_issues + ukus_issues, key=lambda m: (m["start"], m["end"]))
 
             issues.extend(combined)
             left_parts.append(f"<p>{render_text(text, combined) or '&nbsp;'}</p>")
@@ -523,9 +646,9 @@ def analyze_inline(file_bytes):
                     loc = f"Table {tbl_i}, row {r}, col {c}"
 
                     rule_matches = find_matches(text, rules, loc, f"t{tbl_i}_{r}_{c}")
-                    wf_issues = find_spelling_suspects(text, loc, f"t{tbl_i}_{r}_{c}")
+                    dict_issues = find_non_dictionary_words(text, loc, f"t{tbl_i}_{r}_{c}")
                     ukus_issues = find_non_us_words(text, loc, f"t{tbl_i}_{r}_{c}")
-                    combined = sorted(rule_matches + wf_issues + ukus_issues, key=lambda m: (m["start"], m["end"]))
+                    combined = sorted(rule_matches + dict_issues + ukus_issues, key=lambda m: (m["start"], m["end"]))
 
                     issues.extend(combined)
                     cells.append(f"<td>{render_text(text, combined) or '&nbsp;'}</td>")
