@@ -1,9 +1,6 @@
-streamlit>=1.29,<2.0
-gspread>=6.1.0,<7.0
-google-auth>=2.22.0,<3.0
-python-docx>=1.1.0,<1.2.0
-pandas>=2.0.0,<3.0.0
-wordfreq>=3.0,<4.0
-langcodes>=3.3.0
-spylls
-certifi
+
+streamlit>=1.33
+spylls==0.1.7
+python-docx>=0.8.11
+gspread>=6.0.0
+google-auth>=2.20.0
