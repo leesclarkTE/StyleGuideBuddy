@@ -223,13 +223,34 @@ def _sa_info_from_secrets() -> dict:
         sa_info["private_key"] = pk.replace("\\n", "\n").replace("\r\n", "\n").replace("\r", "\n")
     return sa_info
 
+
 def _validate_private_key_pem(pem: str):
+    """
+    Validate the PEM just enough to catch obvious paste errors, but be tolerant
+    of harmless whitespace artifacts introduced by Secrets UI.
+    """
     if not pem or "BEGIN PRIVATE KEY" not in pem or "END PRIVATE KEY" not in pem:
         raise ValueError("Private key is missing BEGIN/END PRIVATE KEY markers.")
-    lines = [ln.strip() for ln in pem.splitlines()]
-    body = "".join(ln for ln in lines if ln and not ln.startswith("-----"))
-    import base64, binascii
-    base64.b64decode(body, validate=True)  # will raise binascii.Error if malformed
+
+    # Extract the base64 body (lines between the markers)
+    lines = [ln.rstrip("\r\n") for ln in pem.splitlines()]
+    # Keep everything that's not a header/footer
+    body_lines = [ln.strip() for ln in lines if not ln.startswith("-----") and ln.strip()]
+    body = "".join(body_lines)
+
+    # Remove any characters that are not in base64 alphabet (defensive)
+    import re, base64, binascii
+    cleaned = re.sub(r"[^A-Za-z0-9+/=]", "", body)
+
+    # Optional sanity: strip trailing padding noise beyond two '='
+    cleaned = re.sub(r"=+$", lambda m: "=" * min(2, len(m.group(0))), cleaned)
+
+    try:
+        # Be permissive here; we already sanitized non-base64 chars.
+        base64.b64decode(cleaned, validate=False)
+    except binascii.Error as e:
+        raise ValueError(f"Private key Base64 decoding failed (likely newline/quoting issue): {e}") from e
+
 
 @st.cache_resource(show_spinner=False)
 def get_gspread_client():
