@@ -206,7 +206,7 @@ def save_caps_whitelist_local(acros: set[str]):
     RULES_DIR.mkdir(exist_ok=True, parents=True)
     CAPS_FILE.write_text(json.dumps(sorted(acros), indent=2, ensure_ascii=False), encoding="utf-8")
 
-# ---- PEM canonicalizer (NEW) ----
+# ---- PEM canonicalizer (kept) ----
 def _canonicalize_pem(pem: str) -> str:
     """
     Rebuild a well-formed PKCS#8 PEM from whatever was pasted:
@@ -218,7 +218,7 @@ def _canonicalize_pem(pem: str) -> str:
     if not pem or "BEGIN PRIVATE KEY" not in pem or "END PRIVATE KEY" not in pem:
         return pem
 
-    import re, textwrap
+    import re as _re, textwrap
     pem = pem.replace("\r\n", "\n").replace("\r", "\n")
     lines = [ln.strip() for ln in pem.splitlines()]
 
@@ -228,7 +228,7 @@ def _canonicalize_pem(pem: str) -> str:
     # Pull out base64 body lines (everything not header/footer and not empty)
     body = "".join(ln for ln in lines if ln and ln != header and ln != footer)
     # Remove anything that's not base64 alphabet or padding
-    body = re.sub(r"[^A-Za-z0-9+/=]", "", body)
+    body = _re.sub(r"[^A-Za-z0-9+/=]", "", body)
 
     # Fix padding if required
     rem = len(body) % 4
@@ -254,7 +254,7 @@ def _sa_info_from_secrets() -> dict:
     if "BEGIN PRIVATE KEY" in pk:
         # normalize newline escapes -> real newlines
         sa_info["private_key"] = pk.replace("\\n", "\n").replace("\r\n", "\n").replace("\r", "\n")
-        # canonicalize (NEW)
+        # canonicalize
         sa_info["private_key"] = _canonicalize_pem(sa_info["private_key"])
     return sa_info
 
@@ -274,11 +274,11 @@ def _validate_private_key_pem(pem: str):
     body = "".join(body_lines)
 
     # Remove any characters that are not in base64 alphabet (defensive)
-    import re, base64, binascii
-    cleaned = re.sub(r"[^A-Za-z0-9+/=]", "", body)
+    import re as _re, base64, binascii
+    cleaned = _re.sub(r"[^A-Za-z0-9+/=]", "", body)
 
     # Optional sanity: strip trailing padding noise beyond two '='
-    cleaned = re.sub(r"=+$", lambda m: "=" * min(2, len(m.group(0))), cleaned)
+    cleaned = _re.sub(r"=+$", lambda m: "=" * min(2, len(m.group(0))), cleaned)
 
     try:
         # Be permissive here; we already sanitized non-base64 chars.
@@ -432,6 +432,57 @@ ensure_state()
 # ===========================
 # MATCHING & SPELL-CHECK HELPERS
 # ===========================
+
+def _is_block_mostly_all_caps(text: str) -> bool:
+    """
+    Returns True if this block (paragraph/cell) is essentially ALL‑CAPS,
+    even if sentence splitting fails (common with .docx run artifacts).
+    Heuristic:
+      - long blocks: >= 10 letters and >= 80% uppercase
+      - short headings: >= 6 letters and 100% uppercase
+    """
+    if not text:
+        return False
+
+    letters = [ch for ch in text if ch.isalpha()]
+    if not letters:
+        return False
+
+    upper = sum(1 for ch in letters if ch.isupper())
+    n = len(letters)
+
+    long_mostly_caps = (n >= 10 and upper / n >= 0.80)
+    short_all_caps   = (n >= 6 and upper == n)
+
+    return long_mostly_caps or short_all_caps
+
+
+def _suppress_cap_words_inside_cap_sent(caps_sent_issues: list[dict], caps_word_issues: list[dict]) -> list[dict]:
+    """
+    If a sentence/line is ALL‑CAPS (yellow caution), suppress individual ALL‑CAPS
+    word cautions fully contained within any such sentence/line span.
+    """
+    if not caps_sent_issues or not caps_word_issues:
+        return caps_word_issues
+
+    # Build list of sentence spans
+    sent_spans = [(int(i["start"]), int(i["end"])) for i in caps_sent_issues]
+
+    def _inside_any_sentence(w_start: int, w_end: int) -> bool:
+        for s_start, s_end in sent_spans:
+            # fully contained
+            if w_start >= s_start and w_end <= s_end:
+                return True
+        return False
+
+    filtered = []
+    for w in caps_word_issues:
+        w_start, w_end = int(w.get("start", -1)), int(w.get("end", -1))
+        if not _inside_any_sentence(w_start, w_end):
+            filtered.append(w)
+    return filtered
+
+
 def _normalize_for_match(s: str) -> str:
     if not s:
         return ""
@@ -592,34 +643,213 @@ def find_non_dictionary_words(text: str, location: str, prefix: str):
     return issues
 
 # ----- ALL-CAPS SENTENCE CAUTION -----
+
 def _iter_sentences_with_spans(text: str):
+    """
+    Yield (start, end, sentence_text) using a tolerant splitter:
+    - Primary split on [.?!] followed by whitespace.
+    - Also split on explicit newlines so ALL‑CAPS lines without punctuation are considered.
+    - Always return the trailing chunk, even without terminal punctuation.
+    """
+    if not text:
+        return [(0, 0, "")]
+
     spans = []
     last = 0
+
+    # First pass: split on punctuation + whitespace (e.g., ". " or "!  ")
     for m in re.finditer(r"([.!?])\s+", text):
         end = m.end()
         spans.append((last, end, text[last:end]))
         last = end
+
+    # Handle the tail (text after the last punctuation split)
     if last < len(text):
-        spans.append((last, len(text), text[last:len(text)]))
+        tail = text[last:]
+
+        # Second pass within the tail: split on explicit newlines
+        line_start_abs = last
+        for ln in re.finditer(r"\n+", tail):
+            line_end_abs = last + ln.start()
+            if line_end_abs > line_start_abs:
+                spans.append((line_start_abs, line_end_abs, text[line_start_abs:line_end_abs]))
+            line_start_abs = last + ln.end()
+
+        # Final trailing line/chunk
+        if line_start_abs < len(text):
+            spans.append((line_start_abs, len(text), text[line_start_abs:]))
+
+    # Fallback: entire text if nothing matched
     if not spans:
         spans = [(0, len(text), text)]
     return spans
 
+
+
 def find_all_caps_sentences(text: str, location: str, prefix: str):
+    """
+    Detect contiguous ALL‑CAPS spans (regardless of .docx run boundaries)
+    and return ONE caution per span.
+    """
     issues = []
-    for idx, (s, e, sent) in enumerate(_iter_sentences_with_spans(text), 1):
-        letters = [ch for ch in sent if ch.isalpha()]
-        if len(letters) < 10:
+    token_re = re.compile(r"\b[A-Za-z][A-Za-z’'-]*\b")
+    
+    tokens = [(m.start(), m.end(), m.group()) for m in token_re.finditer(text)]
+    if not tokens:
+        return issues
+
+    
+
+def find_all_caps_sentences(text: str, location: str, prefix: str):
+    """
+    Detect contiguous ALL‑CAPS spans (regardless of .docx run boundaries)
+    and return ONE caution per span.
+    """
+    # Normalise hidden breaks
+    text = text.replace("\r", "").replace("\n", " ")
+
+    issues = []
+    token_re = re.compile(r"\b[A-Za-z][A-Za-z’'-]*\b")
+
+    tokens = [(m.start(), m.end(), m.group()) for m in token_re.finditer(text)]
+    if not tokens:
+        return []
+
+    # Whitelist-aware caps detector
+    def is_caps_word(tok: str):
+        wl = DEFAULT_CAPS_WHITELIST | st.session_state.get("caps_whitelist", set())
+        letters = "".join(ch for ch in tok if ch.isalpha())
+        if len(letters) < 2:
+            return False
+        if letters in wl:
+            return False
+        return letters.isupper()
+
+    # Build spans of consecutive ALL‑CAPS tokens
+    spans = []
+    span_start = None
+    for i, (s, e, tok) in enumerate(tokens):
+        if is_caps_word(tok):
+            if span_start is None:
+                span_start = i
+        else:
+            if span_start is not None:
+                spans.append((span_start, i - 1))
+                span_start = None
+    if span_start is not None:
+        spans.append((span_start, len(tokens) - 1))
+
+    final_spans = []
+    for si, ei in spans:
+        span_tokens = tokens[si:ei + 1]
+
+        letters = [ch for _, _, tok in span_tokens for ch in tok if ch.isalpha()]
+        if len(letters) < 6:
             continue
-        upper = sum(1 for ch in letters if ch.isupper())
-        if upper / len(letters) >= 0.80:
-            issues.append({
-                "start": s, "end": e,
-                "issue": sent.strip()[:80] + ("…" if len(sent.strip()) > 80 else ""),
-                "replacement": None, "explanation": "Avoid ALL‑CAPS sentences; use normal capitalization.",
-                "category": "style_guide_caution", "location": location, "anchor": f"{prefix}_caps{idx}",
-            })
+
+        start = span_tokens[0][0]
+        end   = span_tokens[-1][1]
+
+        # Tighten boundaries
+        while start < end and not text[start].isalpha():
+            start += 1
+        while end > start and not text[end-1].isalpha():
+            end -= 1
+
+        final_spans.append((start, end))
+
+    # Build issues
+    out = []
+    for idx, (s, e) in enumerate(final_spans, 1):
+        chunk = text[s:e]
+        out.append({
+            "start": s,
+            "end": e,
+            "issue": chunk[:80] + ("…" if len(chunk) > 80 else ""),
+            "replacement": None,
+            "explanation": "Avoid ALL‑CAPS sentences/lines; use normal capitalization.",
+            "category": "style_guide_caution",
+            "location": location,
+            "anchor": f"{prefix}_caps{idx}",
+        })
+
+    return out
+
+    # Walk tokens & form spans of consecutive ALL‑CAPS tokens
+    spans = []
+    span_start = None
+    for i, (s, e, tok) in enumerate(tokens):
+        if is_caps_word(tok):
+            if span_start is None:
+                span_start = i
+        else:
+            if span_start is not None:
+                spans.append((span_start, i - 1))
+                span_start = None
+    if span_start is not None:
+        spans.append((span_start, len(tokens) - 1))
+
+    # Convert spans → (start_idx, end_idx in the original text)
+    final_spans = []
+    for si, ei in spans:
+        span_tokens = tokens[si:ei + 1]
+        letters = [ch for _, _, tok in span_tokens for ch in tok if ch.isalpha()]
+        if len(letters) < 6:
+            continue   # ignore small sequences like “THE”
+        # build final span
+        start = span_tokens[0][0]
+        end   = span_tokens[-1][1]
+        final_spans.append((start, end))
+
+    # Create issues
+    for idx, (s, e) in enumerate(final_spans, 1):
+        chunk = text[s:e]
+        issues.append({
+            "start": s,
+            "end": e,
+            "issue": chunk[:80] + ("…" if len(chunk) > 80 else ""),
+            "replacement": None,
+            "explanation": "Avoid ALL‑CAPS sentences/lines; use normal capitalization.",
+            "category": "style_guide_caution",
+            "location": location,
+            "anchor": f"{prefix}_caps{idx}",
+        })
+
     return issues
+
+    # --------------------------------------
+
+    # Normal per‑sentence logic
+    for idx, (s, e, sent) in enumerate(_iter_sentences_with_spans(text), 1):
+        chunk = sent.strip()
+        if not chunk:
+            continue
+
+        letters = [ch for ch in chunk if ch.isalpha()]
+        if not letters:
+            continue
+
+        upper = sum(1 for ch in letters if ch.isupper())
+        n = len(letters)
+
+        long_mostly_caps = (n >= 10 and upper / n >= 0.80)
+        short_all_caps   = (n >= 6  and upper == n)
+
+        if long_mostly_caps or short_all_caps:
+            issues.append({
+                "start": s,
+                "end": e,
+                "issue": chunk[:80] + ("…" if len(chunk) > 80 else ""),
+                "replacement": None,
+                "explanation": "Avoid ALL‑CAPS sentences/lines; use normal capitalization.",
+                "category": "style_guide_caution",
+                "location": location,
+                "anchor": f"{prefix}_caps{idx}",
+            })
+
+    return issues
+
+
 
 # ----- ALL-CAPS WORD CAUTION -----
 def find_all_caps_words(text: str, location: str, prefix: str):
@@ -671,7 +901,7 @@ def _dedupe_by_span(issues: list[dict]) -> list[dict]:
     return kept
 
 # ===========================
-# INLINE CHECKER RENDERING
+# INLINE CHECKER RENDERING (.docx)
 # ===========================
 HIGHLIGHT_STYLE = {
     "style_guide_rule": "border-bottom:2px solid #ff4d4d;",
@@ -687,26 +917,57 @@ def flatten_rules():
                 out.append({**r, "category": cat})
     return out
 
+
+
 def render_text(text, matches):
+    """
+    Safe renderer: no duplication, no broken spans, no misaligned indexes.
+    This version advances the cursor correctly and never re-appends matched text.
+    """
     if not matches:
         return html.escape(text)
-    out, last = [], 0
+
+    # Sort matches in case they're not already
+    matches = sorted(matches, key=lambda m: m["start"])
+
+    out = []
+    cursor = 0
+
     for m in matches:
-        if m["start"] < last:
+        start = m["start"]
+        end   = m["end"]
+
+        if start < cursor:
+            # overlapping or nested match – skip
             continue
-        out.append(html.escape(text[last:m["start"]]))
+
+        # Append text before the highlight
+        out.append(html.escape(text[cursor:start]))
+
         tooltip = html.escape(
             f"Issue: {m['issue']}\n"
             f"Replacement: {m['replacement'] or '—'}\n"
             f"{m['explanation']}"
         )
+
+        # Append highlighted section
         out.append(
-            f'<span id="{m["anchor"]}" style="{HIGHLIGHT_STYLE[m["category"]]}" title="{tooltip}">'
-            f'{html.escape(text[m["start"]:m["end"]])}</span>'
+            f'<span id="{m["anchor"]}" '
+            f'style="{HIGHLIGHT_STYLE[m["category"]]}" '
+            f'title="{tooltip}">'
+            f'{html.escape(text[start:end])}'
+            f'</span>'
         )
-        last = m["end"]
-    out.append(html.escape(text[last:]))
+
+        # 🔑 Critical fix: ADVANCE CURSOR PAST THE MATCH
+        cursor = end
+
+    # Append remaining text AFTER last match
+    if cursor < len(text):
+        out.append(html.escape(text[cursor:]))
+
     return "".join(out)
+
 
 def iter_blocks(doc):
     p_i = t_i = 0
@@ -717,6 +978,7 @@ def iter_blocks(doc):
         elif isinstance(el, CT_Tbl):
             yield "tbl", doc.tables[t_i]
             t_i += 1
+
 
 def analyze_inline(file_bytes):
     doc = Document(io.BytesIO(file_bytes))
@@ -731,10 +993,16 @@ def analyze_inline(file_bytes):
             loc = f"Paragraph {para_i}"
 
             rule_matches = find_matches(text, rules, loc, f"p{para_i}")
-            dict_issues = find_non_dictionary_words(text, loc, f"p{para_i}")
+            dict_issues  = find_non_dictionary_words(text, loc, f"p{para_i}")
             ukus_issues  = find_non_us_words(text, loc, f"p{para_i}")
             caps_sent    = find_all_caps_sentences(text, loc, f"p{para_i}")
             caps_words   = find_all_caps_words(text, loc, f"p{para_i}")
+
+            # Suppress word-level ALL‑CAPS cautions if a sentence/line is flagged,
+            # or if the whole paragraph looks ALL‑CAPS (belt-and-braces for .docx artifacts)
+            caps_words = _suppress_cap_words_inside_cap_sent(caps_sent, caps_words)
+            if caps_sent or _is_block_mostly_all_caps(text):
+                caps_words = []
 
             combined = _dedupe_by_span(rule_matches + ukus_issues + dict_issues + caps_sent + caps_words)
             issues.extend(combined)
@@ -750,10 +1018,14 @@ def analyze_inline(file_bytes):
                     loc = f"Table {tbl_i}, row {r}, col {c}"
 
                     rule_matches = find_matches(text, rules, loc, f"t{tbl_i}_{r}_{c}")
-                    dict_issues = find_non_dictionary_words(text, loc, f"t{tbl_i}_{r}_{c}")
+                    dict_issues  = find_non_dictionary_words(text, loc, f"t{tbl_i}_{r}_{c}")
                     ukus_issues  = find_non_us_words(text, loc, f"t{tbl_i}_{r}_{c}")
                     caps_sent    = find_all_caps_sentences(text, loc, f"t{tbl_i}_{r}_{c}")
                     caps_words   = find_all_caps_words(text, loc, f"t{tbl_i}_{r}_{c}")
+
+                    caps_words = _suppress_cap_words_inside_cap_sent(caps_sent, caps_words)
+                    if caps_sent or _is_block_mostly_all_caps(text):
+                        caps_words = []
 
                     combined = _dedupe_by_span(rule_matches + ukus_issues + dict_issues + caps_sent + caps_words)
                     issues.extend(combined)
@@ -844,30 +1116,193 @@ def analyze_inline(file_bytes):
     full_html = PAGE_TMPL.substitute(left_html=left_html, right_html=right_html)
     return full_html, issues_sorted
 
+
+# ===========================
+# NEW: Analyze raw pasted text
+# ===========================
+def analyze_text_input(text_input: str):
+    """
+    Analyze raw text pasted/typed by the user and return (full_html, issues_sorted)
+    using the same rendering pipeline as the .docx analyzer.
+    Blank lines split paragraphs.
+    """
+    raw = text_input or ""
+    blocks = [blk for blk in re.split(r"\n\s*\n", raw.strip())] if raw.strip() else []
+
+    rules = flatten_rules()
+    left_parts, issues = [], []
+
+    for i, paragraph in enumerate(blocks, 1):
+        text = _normalize_for_match(paragraph)
+        loc  = f"Paragraph {i}"
+
+        rule_matches = find_matches(text, rules, loc, f"tp{i}")
+        dict_issues  = find_non_dictionary_words(text, loc, f"tp{i}")
+        ukus_issues  = find_non_us_words(text, loc, f"tp{i}")
+        caps_sent    = find_all_caps_sentences(text, loc, f"tp{i}")
+        caps_words   = find_all_caps_words(text, loc, f"tp{i}")
+
+        # Match DOCX logic for consistency.
+        caps_words = _suppress_cap_words_inside_cap_sent(caps_sent, caps_words)
+        if caps_sent or _is_block_mostly_all_caps(text):
+            caps_words = []
+
+        combined = _dedupe_by_span(rule_matches + ukus_issues + dict_issues + caps_sent + caps_words)
+        issues.extend(combined)
+        left_parts.append(f"<p>{render_text(text, combined) or '&nbsp;'}</p>")
+
+    left_html = "".join(left_parts) or "<p>&nbsp;</p>"
+
+    # Right pane
+    issues_sorted = sorted(issues, key=_severity_key)
+    right_items = []
+    for i in issues_sorted:
+        color = "#ff4d4d" if i["category"] == "style_guide_rule" else "#ffcc00"
+        right_items.append(
+            f"<a href=\"#{i['anchor']}\" class=\"issue-card\" data-anchor=\"{i['anchor']}\" "
+            f"style=\"border-left:4px solid {color}\">"
+            f"<div class=\"term\"><strong>{html.escape(i['issue'])}</strong></div>"
+            f"<div><em>Replacement:</em> {html.escape(i['replacement'] or '—')}</div>"
+            f"<div>{html.escape(i['explanation'])}</div>"
+            f"<div class=\"loc\">{html.escape(i['location'])}</div>"
+            f"</a>"
+        )
+    right_html = "".join(right_items) or "<div class='no-issues'>No issues found 🎉</div>"
+
+    PAGE_TMPL = Template("""
+    <style>
+      html { scroll-behavior:smooth; }
+      .wrap { display:grid; grid-template-columns:1fr 420px; gap:20px; }
+      .doc, .issues {
+        height:650px; overflow:auto; border:1px solid #e6e6e6;
+        padding:16px; border-radius:8px; background:#fff;
+      }
+      .issues { background:#fafafa; }
+      .issue-card {
+        display:block; text-decoration:none; color:#000;
+        background:#fff; border:1px solid #eee;
+        border-radius:6px; padding:10px; margin-bottom:10px;
+      }
+      .doc-table td { border:1px solid #eee; padding:8px 10px; }
+      @keyframes flashBg {
+        0% { background:#ffe8a0; }
+        100% { background:transparent; }
+      }
+      .flash { animation: flashBg 1.2s ease-out; }
+    </style>
+
+    <div class="wrap">
+      <div class="doc" id="doc-pane">
+        $left_html
+      </div>
+      <div class="issues">
+        <h4>Issues</h4>
+        $right_html
+      </div>
+    </div>
+
+    <script>
+    (function(){
+      const docPane = document.getElementById("doc-pane");
+      function offsetTop(el, ancestor){
+        let top = 0;
+        while (el && el !== ancestor){
+          top += el.offsetTop;
+          el = el.offsetParent;
+        }
+        return top;
+      }
+      function flash(el){
+        el.classList.remove("flash");
+        void el.offsetWidth;
+        el.classList.add("flash");
+      }
+      document.querySelectorAll(".issue-card").forEach(card => {
+        card.addEventListener("click", e => {
+          e.preventDefault();
+          const id = card.dataset.anchor;
+          const target = document.getElementById(id);
+          if (!target || !docPane) return;
+          docPane.scrollTo({ top: offsetTop(target, docPane) - 12, behavior:"smooth" });
+          flash(target);
+        });
+      });
+    })();
+    </script>
+    """)
+    full_html = PAGE_TMPL.substitute(left_html=left_html, right_html=right_html)
+    return full_html, issues_sorted
+
 # ===========================
 # TABS
 # ===========================
 tab_check, tab_rules = st.tabs(["📄 Style Checker", "📋 Add/Edit Rules"])
 
 with tab_check:
-    uploaded = st.file_uploader("Upload Word document (.docx)", type=["docx"])
-    if uploaded:
-        page_html, issues = analyze_inline(uploaded.read())
-        components.html(page_html, height=720, scrolling=True)
+    st.markdown("Use either **Paste text** or **Upload .docx** to analyze content.")
+    sub_paste, sub_docx = st.tabs(["✍️ Paste text", "📤 Upload .docx"])
 
-        st.subheader("🧾 Summary Table")
-        st.dataframe(
-            [
-                {
-                    "issue": i["issue"],
-                    "replacement": i["replacement"] or "—",
-                    "explanation": i["explanation"],
-                    "location": i["location"],
-                }
-                for i in issues
-            ],
-            use_container_width=True,
+    with sub_paste:
+        default_placeholder = (
+            "Paste or type your text here.\n\n"
+            "Example:\n"
+            "THIS IS AN ALL CAPS SENTENCE FOR TESTING.\n\n"
+            "Our favourite neighbour visited the centre yesterday. "
+            "We also noticed an envionmentt issue."
         )
+        text_input = st.text_area(
+            "Text to analyze",
+            value=default_placeholder,
+            height=220,
+            help="Blank lines split paragraphs. The checker uses the same rules as the .docx path."
+        )
+        c1, c2 = st.columns([1, 1])
+        run_paste = c1.button("Analyze text", type="primary", use_container_width=True)
+        if c2.button("Clear", type="secondary", use_container_width=True):
+            st.session_state.pop("last_text_results", None)
+            st.rerun()
+
+        if run_paste and text_input.strip():
+            page_html, issues = analyze_text_input(text_input)
+            st.session_state["last_text_results"] = (page_html, issues)
+
+        if "last_text_results" in st.session_state:
+            page_html, issues = st.session_state["last_text_results"]
+            components.html(page_html, height=720, scrolling=True)
+
+            st.subheader("🧾 Summary Table (pasted text)")
+            st.dataframe(
+                [
+                    {
+                        "issue": i["issue"],
+                        "replacement": i["replacement"] or "—",
+                        "explanation": i["explanation"],
+                        "location": i["location"],
+                    }
+                    for i in issues
+                ],
+                use_container_width=True,
+            )
+
+    with sub_docx:
+        uploaded = st.file_uploader("Upload Word document (.docx)", type=["docx"])
+        if uploaded:
+            page_html, issues = analyze_inline(uploaded.read())
+            components.html(page_html, height=720, scrolling=True)
+
+            st.subheader("🧾 Summary Table (.docx)")
+            st.dataframe(
+                [
+                    {
+                        "issue": i["issue"],
+                        "replacement": i["replacement"] or "—",
+                        "explanation": i["explanation"],
+                        "location": i["location"],
+                    }
+                    for i in issues
+                ],
+                use_container_width=True,
+            )
 
 with tab_rules:
     def _reload_rules():

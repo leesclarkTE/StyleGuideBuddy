@@ -1,6 +1,7 @@
-
-streamlit>=1.33
-spylls==0.1.7
-python-docx>=0.8.11
-gspread>=6.0.0
-google-auth>=2.20.0
+streamlit
+spylls
+python-docx
+gspread
+google-auth
+google-auth-oauthlib
+google-auth-httplib2
