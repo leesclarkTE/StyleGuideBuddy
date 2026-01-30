@@ -420,12 +420,19 @@ def get_or_create_worksheet():
     gc = get_gspread_client()
     sh = gc.open_by_key(st.secrets["gsheets"]["SPREADSHEET_ID"])
     ws_name = st.secrets["gsheets"].get("WORKSHEET_NAME", "rules")
+    allow_create = bool(st.secrets["gsheets"].get("ALLOW_CREATE", False))  # default: don't create
+
     try:
-        ws = sh.worksheet(ws_name)
+        return sh.worksheet(ws_name)
     except WorksheetNotFound:
+        if not allow_create:
+            raise WorksheetNotFound(
+                f"Worksheet '{ws_name}' not found. Set gsheets.WORKSHEET_NAME to the correct tab, "
+                f"or temporarily set gsheets.ALLOW_CREATE=true to create it."
+            )
         ws = sh.add_worksheet(title=ws_name, rows=100, cols=10)
         ws.update("A1", [GS_EXPECTED_COLS])
-    return ws
+        return ws
 
 @st.cache_data(ttl=60, show_spinner=False)
 def load_rules_sheets() -> dict:
@@ -570,18 +577,55 @@ def _get_paragraph_type(paragraph):
 
 def _is_sentence_case(text: str) -> bool:
     """
-    Checks if the text is in sentence case:
-    - First character uppercase
-    - Rest mostly lowercase
+    Tolerant sentence‑case check:
+    - If the line begins with a number (e.g., "60 ..."), we DO NOT require the
+      first alphabetic character to be uppercase.
+    - Otherwise, the first *alphabetic* character must be uppercase.
+    - Proper nouns / Title Case inside the sentence are allowed.
+    - ALL‑CAPS words of length >= 2 that are NOT whitelisted are NOT allowed.
+    - Single-letter uppercase words like 'I' are allowed.
+    - Leading quotes or punctuation are ignored for the first-letter check.
     """
-    text = text.strip()
-    if not text:
+    t = (text or "").strip()
+    if not t:
         return True
-    first = text[0]
-    rest = text[1:]
-    # Allow proper nouns and short all-caps words
-    return first.isupper() and (rest == rest.lower() or rest.islower())
 
+    # Detect if the sentence starts with a number (ignoring leading quotes/punct)
+    # Examples allowed: '60 per cent...', '(60) percent...', '“60 percent...”'
+    i = 0
+    while i < len(t) and not (t[i].isalnum() or t[i].isalpha()):
+        i += 1
+    starts_with_digit = (i < len(t) and t[i].isdigit())
+
+    # Find first alphabetic char for the usual check
+    first_alpha = None
+    for ch in t:
+        if ch.isalpha():
+            first_alpha = ch
+            break
+
+    if first_alpha is None:
+        return True  # no letters → trivially OK
+
+    # If sentence starts with a digit, allow first alphabetic to be lowercase.
+    if not starts_with_digit and not first_alpha.isupper():
+        return False
+
+    # Disallow non‑whitelisted ALL‑CAPS tokens (>= 2 letters)
+    token_re = re.compile(r"[A-Za-z][A-Za-z’'-]*")
+    wl = DEFAULT_CAPS_WHITELIST | st.session_state.get("caps_whitelist", set())
+    for m in token_re.finditer(t):
+        tok = m.group()
+        letters = "".join(ch for ch in tok if ch.isalpha())
+        if len(letters) <= 1:
+            continue
+        if letters in wl:   # already uppercased in store
+            continue
+        if letters.isupper():
+            # Found a non‑whitelisted ALL‑CAPS word of length >= 2
+            return False
+
+    return True
 
 def _is_block_mostly_all_caps(text: str) -> bool:
     """
@@ -1140,12 +1184,75 @@ def _severity_key(item: dict):
     return (sev, str(item.get("location", "")), int(item.get("start", 0)), int(item.get("end", 0)))
 
 def _dedupe_by_span(issues: list[dict]) -> list[dict]:
-    def _pri(a: str) -> int:
-        if "_us" in a:   return 0
-        if "_m" in a:    return 1
-        if "_dict" in a: return 2
-        if "_caps" in a or "_capw" in a: return 3
+    """
+    Dedupe by (start,end) span with a priority order so we keep only the highest priority
+    item for any overlapping or identical span.
+
+    Priority (lower is stronger):
+      0 = ALL‑CAPS sentence/word issues: anchors containing "_caps" or "_capw"
+      1 = UK→US spelling: anchors containing "_us"
+      2 = explicit style‑guide matches: anchors containing "_m"
+      3 = dictionary issues: anchors containing "_dict"
+      9 = everything else (e.g., TX sentence-case cautions "tx_...")
+    """
+    def _pri(anchor: str | None) -> int:
+        a = anchor or ""
+        if "_caps" in a or "_capw" in a:
+            return 0
+        if "_us" in a:
+            return 1
+        if "_m" in a:
+            return 2
+        if "_dict" in a:
+            return 3
         return 9
+
+    # Sort by priority first, then by span (stable for deterministic results)
+    sorted_issues = sorted(
+        issues,
+        key=lambda i: (_pri(i.get("anchor")), int(i.get("start", 0)), int(i.get("end", 0)))
+    )
+
+    kept: list[dict] = []
+    # track spans we've already claimed with a higher-priority issue
+    occupied_spans: list[tuple[int, int]] = []
+
+    def _overlaps(a: tuple[int, int], b: tuple[int, int]) -> bool:
+        # [a0, a1) overlaps [b0, b1) if they intersect
+        a0, a1 = a
+        b0, b1 = b
+        return not (a1 <= b0 or b1 <= a0)
+
+    for it in sorted_issues:
+        s = int(it.get("start", -1))
+        e = int(it.get("end", -1))
+        if s < 0 or e < 0 or e <= s:
+            # ignore malformed spans
+            continue
+
+        span = (s, e)
+
+        # If this span overlaps any previously kept span, skip it.
+        # Because we sorted by priority, previously kept spans are higher priority.
+        if any(_overlaps(span, occ) for occ in occupied_spans):
+            continue
+
+        kept.append(it)
+        occupied_spans.append(span)
+
+    # Final sort for UI: severity then location/position (kept items already unique)
+    def _severity_key(item: dict):
+        # Keep your existing severity notion: rules before cautions
+        sev = 0 if item.get("category") == "style_guide_rule" else 1
+        return (
+            sev,
+            str(item.get("location", "")),
+            int(item.get("start", 0)),
+            int(item.get("end", 0))
+        )
+
+    return sorted(kept, key=_severity_key)
+
     sorted_issues = sorted(
         issues,
         key=lambda i: (_pri(i.get("anchor", "")), int(i.get("start", 0)), int(i.get("end", 0)))
@@ -1258,11 +1365,14 @@ def analyze_inline(file_bytes):
             
             # --- Textile Exchange case enforcement ---
             tx_issues = []
+            has_caps_issue = bool (caps_sent or caps_words)
+    
             if para_type == "dpcument title":
                 # Title case allowed; nothing to flag
                 pass
-            elif para_type in ("subheader", "body", "third-level", "fourth-level"):
-                if not _is_sentence_case(text):
+            elif para_type in ("subheader", "body", "third-subheader", "fourth-subheader"):
+                #If ALL-CAPS issues exist in this paragraph, supress sentence-case caution.
+                if not has_caps_issue and not _is_sentence_case (text) :
                     tx_issues.append({
                         "start": 0,
                         "end": len(text),
@@ -1471,8 +1581,8 @@ with tab_check:
             help="Blank lines split paragraphs. The checker uses the same rules as the .docx path."
         )
         c1, c2 = st.columns([1, 1])
-        run_paste = c1.button("Analyze text", type="primary", use_container_width=True)
-        if c2.button("Clear", type="secondary", use_container_width=True):
+        run_paste = c1.button("Analyze text", type="primary", width="stretch")
+        if c2.button("Clear", type="secondary", width="stretch"):
             st.session_state.pop("last_text_results", None)
             st.rerun()
 
@@ -1495,7 +1605,7 @@ with tab_check:
                     }
                     for i in issues
                 ],
-                use_container_width=True,
+                use_container_width="stretch",
             )
 
     with sub_docx:
@@ -1515,7 +1625,7 @@ with tab_check:
                     }
                     for i in issues
                 ],
-                use_container_width=True,
+                use_container_width="stretch",
             )
 
 with tab_rules:
@@ -1613,6 +1723,8 @@ with tab_rules:
                     save_rules(st.session_state.rules)
                     st.rerun()
 
+
+
     # ---------------- Acronym Whitelist (ALL‑CAPS) ----------------
     st.divider()
     st.subheader("🔠 Acronym Whitelist (ALL‑CAPS)")
@@ -1663,3 +1775,13 @@ with tab_rules:
         st.session_state.caps_whitelist = load_caps_whitelist()
 
     st.button("↻ Reload acronym whitelist", on_click=_reload_caps_whitelist, type="secondary")
+def _rules_count_summary(rules: dict) -> str:
+    r = rules or {}
+    return f"{len(r.get('style_guide_rule', []))} rules, {len(r.get('style_guide_caution', []))} cautions"
+
+ws_dbg = st.secrets.get("gsheets", {})
+st.caption(
+    "Rules source: " +
+    ("Google Sheets ✅" if SHEETS_ENABLED else "Local JSON 📄") +
+    f" • Worksheet: {ws_dbg.get('WORKSHEET_NAME', 'rules')} • Loaded: {_rules_count_summary(st.session_state.get('rules', {}))}"
+)
