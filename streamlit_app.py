@@ -15,6 +15,122 @@ from docx import Document
 from docx.oxml.text.paragraph import CT_P
 from docx.oxml.table import CT_Tbl
 
+# ==== Shared page template & renderer (used by analyze_inline and analyze_text_input) ====
+from string import Template
+
+PAGE_TMPL_STR = """
+<style>
+  html { scroll-behavior:smooth; }
+  .wrap { display:grid; grid-template-columns:1fr 420px; gap:20px; }
+  .doc, .issues {
+    height:650px; overflow:auto; border:1px solid #e6e6e6;
+    padding:16px; border-radius:8px; background:#fff;
+  }
+  .issues { background:#fafafa; }
+  .issue-card {
+    display:block; text-decoration:none; color:#000;
+    background:#fff; border:1px solid #eee;
+    border-radius:6px; padding:10px; margin-bottom:10px;
+  }
+  .doc-table td { border:1px solid #eee; padding:8px 10px; }
+  @keyframes flashBg { 0% { background:#ffe8a0; } 100% { background:transparent; } }
+  .flash { animation: flashBg 1.2s ease-out; }
+</style>
+
+<div class="wrap">
+  <div class="doc" id="doc-pane">
+    $left_html
+  </div>
+  <div class="issues">
+    <h4>Issues</h4>
+    $right_html
+  </div>
+</div>
+
+<script>
+(function(){
+  const docPane = document.getElementById("doc-pane");
+  function offsetTop(el, ancestor){
+    let top = 0;
+    while (el && el !== ancestor){
+      top += el.offsetTop;
+      el = el.offsetParent;
+    }
+    return top;
+  }
+  function flash(el){
+    el.classList.remove("flash"); void el.offsetWidth; el.classList.add("flash");
+  }
+  document.querySelectorAll(".issue-card").forEach(card => {
+    card.addEventListener("click", e => {
+      e.preventDefault();
+      const id = card.dataset.anchor;
+      const target = document.getElementById(id);
+      if (!target || !docPane) return;
+      docPane.scrollTo({ top: offsetTop(target, docPane) - 12, behavior:"smooth" });
+      flash(target);
+    });
+  });
+})();
+</script>
+"""
+
+def _render_page(left_html: str, right_html: str) -> str:
+  return Template(PAGE_TMPL_STR).substitute(left_html=left_html, right_html=right_html)
+
+
+# INLINE CHECKER RENDERING (.docx)
+# ===========================
+import html
+
+HIGHLIGHT_STYLE = {
+    "style_guide_rule": "border-bottom:2px solid #ff4d4d;",
+    "style_guide_caution": "border-bottom:2px solid #ffcc00;",
+}
+
+def render_text(text, matches):
+    """
+    Safe renderer: no duplication, no broken spans, no misaligned indexes.
+    This version advances the cursor correctly and never re-appends matched text.
+    """
+    if not matches:
+        return html.escape(text)
+
+    matches = sorted(matches, key=lambda m: m["start"])
+    out = []
+    cursor = 0
+
+    for m in matches:
+        start, end = m["start"], m["end"]
+        if start < cursor:
+            continue  # skip overlapping
+
+
+
+        # Append text before highlight
+        out.append(html.escape(text[cursor:start]))
+
+        tooltip = html.escape(
+            f"Issue: {m['issue']}\nReplacement: {m['replacement'] or '—'}\n{m['explanation']}"
+        )
+
+        out.append(
+            f'<span id="{m["anchor"]}" '
+            f'style="{HIGHLIGHT_STYLE[m["category"]]}" '
+            f'title="{tooltip}">'
+            f'{html.escape(text[start:end])}'
+            f'</span>'
+        )
+
+        cursor = end  # advance cursor
+
+    # Append remaining text
+    if cursor < len(text):
+        out.append(html.escape(text[cursor:]))
+
+    return "".join(out)
+
+
 # --- PATHS (bullet-proof) ---
 APP_DIR = Path(__file__).resolve().parent
 DICT_DIR = APP_DIR / "dictionaries" / "en_US"   # expects en_US.aff + en_US.dic
@@ -433,6 +549,40 @@ ensure_state()
 # MATCHING & SPELL-CHECK HELPERS
 # ===========================
 
+# ===========================
+# Paragraph type detection
+# ===========================
+def _get_paragraph_type(paragraph):
+    """
+    Detect the type of paragraph based on Word style.
+    Returns one of:
+    - 'title'
+    - 'subheader' (heading 1/2)
+    - 'body' (normal)
+    """
+    style_name = paragraph.style.name.lower()
+    if "title" in style_name:
+        return "title"
+    elif any(h in style_name for h in ("heading 1", "heading 2", "heading 3")):
+        return "subheader"
+    else:
+        return "body"
+
+def _is_sentence_case(text: str) -> bool:
+    """
+    Checks if the text is in sentence case:
+    - First character uppercase
+    - Rest mostly lowercase
+    """
+    text = text.strip()
+    if not text:
+        return True
+    first = text[0]
+    rest = text[1:]
+    # Allow proper nouns and short all-caps words
+    return first.isupper() and (rest == rest.lower() or rest.islower())
+
+
 def _is_block_mostly_all_caps(text: str) -> bool:
     """
     Returns True if this block (paragraph/cell) is essentially ALL‑CAPS,
@@ -525,6 +675,115 @@ def find_matches(text, rules, location, prefix):
     for i, m in enumerate(matches, 1):
         m["anchor"] = f"{prefix}_m{i}"
     return matches
+
+# ===========================
+# TEXTILE EXCHANGE CASE LOGIC
+# ===========================
+
+TEXTILE_EXCHANGE_LEVELS = {
+    "document_title": {"case": "title"},
+    "subheader": {"case": "sentence"},
+    "third_subheader": {"case": "sentence"},
+    "fourth_subheader": {"case": "sentence"},
+    "body": {"case": "sentence"},
+}
+
+
+def classify_textile_exchange_block(paragraph):
+    """
+    Classify a Word paragraph according to Textile Exchange hierarchy
+    using style name + font size + bold.
+    """
+    style_name = (paragraph.style.name or "").lower() if paragraph.style else ""
+    runs = paragraph.runs
+
+    sizes = [
+        r.font.size.pt for r in runs
+        if r.font.size and r.font.size.pt
+    ]
+    avg_size = sum(sizes) / len(sizes) if sizes else None
+    is_bold = any(r.bold for r in runs if r.bold is not None)
+
+    if style_name == "title" or (avg_size and avg_size >= 22):
+        return "document_title"
+
+    if style_name.startswith("heading 1") or (avg_size and 15 <= avg_size < 18):
+        return "subheader"
+
+    if style_name.startswith("heading 2") or (avg_size == 11 and is_bold):
+        return "third_subheader"
+
+    if style_name.startswith("heading 3") or (avg_size == 10 and is_bold):
+        return "fourth_subheader"
+
+    return "body"
+
+
+def is_title_case(text: str) -> bool:
+    words = re.findall(r"[A-Za-z][A-Za-z’'-]*", text)
+    if not words:
+        return True
+
+    small = {"and","or","the","a","an","of","in","on","for","to","with","by"}
+
+    for i, w in enumerate(words):
+        if i > 0 and w.lower() in small:
+            continue
+        if not w[0].isupper():
+            return False
+    return True
+
+
+def is_sentence_case(text: str) -> bool:
+    t = text.strip()
+    if not t:
+        return True
+
+    for ch in t:
+        if ch.isalpha():
+            return ch.isupper()
+    return True
+
+
+def find_textile_exchange_case_issues(text, block_type, location, prefix):
+    if _is_block_mostly_all_caps(text):
+        return []
+
+    expected = TEXTILE_EXCHANGE_LEVELS.get(block_type, {}).get("case")
+    issues = []
+
+    if expected == "title" and not is_title_case(text):
+        issues.append({
+            "start": 0,
+            "end": len(text),
+            "issue": text[:80] + ("…" if len(text) > 80 else ""),
+            "replacement": None,
+            "explanation": (
+                "Document titles must use Title Case "
+                "according to Textile Exchange style."
+            ),
+            "category": "style_guide_caution",
+            "location": location,
+            "anchor": f"{prefix}_case",
+        })
+
+    if expected == "sentence" and not is_sentence_case(text):
+        issues.append({
+            "start": 0,
+            "end": len(text),
+            "issue": text[:80] + ("…" if len(text) > 80 else ""),
+            "replacement": None,
+            "explanation": (
+                "This text should be in sentence case "
+                "according to Textile Exchange style."
+            ),
+            "category": "style_guide_caution",
+            "location": location,
+            "anchor": f"{prefix}_case",
+        })
+
+    return issues
+
 
 # ===== UK→US ENFORCEMENT =====
 UK_US_MAP = {
@@ -903,9 +1162,11 @@ def _dedupe_by_span(issues: list[dict]) -> list[dict]:
 # ===========================
 # INLINE CHECKER RENDERING (.docx)
 # ===========================
+
 HIGHLIGHT_STYLE = {
     "style_guide_rule": "border-bottom:2px solid #ff4d4d;",
     "style_guide_caution": "border-bottom:2px solid #ffcc00;",
+    "tx_issue": "border-bottom:2px solid #00aaff;",  # optional: Textile Exchange issues
 }
 
 def flatten_rules():
@@ -917,52 +1178,46 @@ def flatten_rules():
                 out.append({**r, "category": cat})
     return out
 
-
-
 def render_text(text, matches):
     """
-    Safe renderer: no duplication, no broken spans, no misaligned indexes.
-    This version advances the cursor correctly and never re-appends matched text.
+    Safe renderer: underlines issues in the text with anchors for scrolling/flash.
+    Works with style guide and Textile Exchange issues.
     """
     if not matches:
         return html.escape(text)
 
-    # Sort matches in case they're not already
+    # Sort matches by start position
     matches = sorted(matches, key=lambda m: m["start"])
-
     out = []
     cursor = 0
 
     for m in matches:
-        start = m["start"]
-        end   = m["end"]
-
+        start, end = m["start"], m["end"]
         if start < cursor:
-            # overlapping or nested match – skip
+            # overlapping/nested – skip
             continue
 
-        # Append text before the highlight
+        # Append normal text before the match
         out.append(html.escape(text[cursor:start]))
 
         tooltip = html.escape(
             f"Issue: {m['issue']}\n"
-            f"Replacement: {m['replacement'] or '—'}\n"
+            f"Replacement: {m.get('replacement') or '—'}\n"
             f"{m['explanation']}"
         )
 
-        # Append highlighted section
+        cat = m.get("category", "tx_issue")  # default to Textile Exchange
+        style = HIGHLIGHT_STYLE.get(cat, "")
+
+        # Append highlighted text
         out.append(
-            f'<span id="{m["anchor"]}" '
-            f'style="{HIGHLIGHT_STYLE[m["category"]]}" '
-            f'title="{tooltip}">'
-            f'{html.escape(text[start:end])}'
-            f'</span>'
+            f'<span id="{m["anchor"]}" style="{style}" title="{tooltip}" class="flash">'
+            f'{html.escape(text[start:end])}</span>'
         )
 
-        # 🔑 Critical fix: ADVANCE CURSOR PAST THE MATCH
         cursor = end
 
-    # Append remaining text AFTER last match
+    # Append remaining text after last match
     if cursor < len(text):
         out.append(html.escape(text[cursor:]))
 
@@ -998,17 +1253,37 @@ def analyze_inline(file_bytes):
             caps_sent    = find_all_caps_sentences(text, loc, f"p{para_i}")
             caps_words   = find_all_caps_words(text, loc, f"p{para_i}")
 
-            # Suppress word-level ALL‑CAPS cautions if a sentence/line is flagged,
-            # or if the whole paragraph looks ALL‑CAPS (belt-and-braces for .docx artifacts)
+            # Determine block type for Textile Exchange enforcement
+            para_type = classify_textile_exchange_block(block)
+            
+            # --- Textile Exchange case enforcement ---
+            tx_issues = []
+            if para_type == "dpcument title":
+                # Title case allowed; nothing to flag
+                pass
+            elif para_type in ("subheader", "body", "third-level", "fourth-level"):
+                if not _is_sentence_case(text):
+                    tx_issues.append({
+                        "start": 0,
+                        "end": len(text),
+                        "issue": text[:80] + ("…" if len(text) > 80 else ""),
+                        "replacement": text.capitalize(),  # simple suggestion
+                        "explanation": f"{para_type.title()} should be in sentence case.",
+                        "category": "style_guide_caution",
+                        "location": loc,
+                        "anchor": f"tx_{para_i}",
+                    })
+
+            # Suppress word-level ALL‑CAPS cautions if sentence flagged
             caps_words = _suppress_cap_words_inside_cap_sent(caps_sent, caps_words)
             if caps_sent or _is_block_mostly_all_caps(text):
                 caps_words = []
 
-            combined = _dedupe_by_span(rule_matches + ukus_issues + dict_issues + caps_sent + caps_words)
+            combined = _dedupe_by_span(rule_matches + ukus_issues + dict_issues + caps_sent + caps_words + tx_issues)
             issues.extend(combined)
             left_parts.append(f"<p>{render_text(text, combined) or '&nbsp;'}</p>")
 
-        else:
+        else:  # table
             tbl_i += 1
             rows_html = []
             for r, row in enumerate(block.rows, 1):
@@ -1052,70 +1327,9 @@ def analyze_inline(file_bytes):
         )
     right_html = "".join(right_items) or "<div class='no-issues'>No issues found 🎉</div>"
 
-    PAGE_TMPL = Template("""
-    <style>
-      html { scroll-behavior:smooth; }
-      .wrap { display:grid; grid-template-columns:1fr 420px; gap:20px; }
-      .doc, .issues {
-        height:650px; overflow:auto; border:1px solid #e6e6e6;
-        padding:16px; border-radius:8px; background:#fff;
-      }
-      .issues { background:#fafafa; }
-      .issue-card {
-        display:block; text-decoration:none; color:#000;
-        background:#fff; border:1px solid #eee;
-        border-radius:6px; padding:10px; margin-bottom:10px;
-      }
-      .doc-table td { border:1px solid #eee; padding:8px 10px; }
-      @keyframes flashBg {
-        0% { background:#ffe8a0; }
-        100% { background:transparent; }
-      }
-      .flash { animation: flashBg 1.2s ease-out; }
-    </style>
-
-    <div class="wrap">
-      <div class="doc" id="doc-pane">
-        $left_html
-      </div>
-      <div class="issues">
-        <h4>Issues</h4>
-        $right_html
-      </div>
-    </div>
-
-    <script>
-    (function(){
-      const docPane = document.getElementById("doc-pane");
-      function offsetTop(el, ancestor){
-        let top = 0;
-        while (el && el !== ancestor){
-          top += el.offsetTop;
-          el = el.offsetParent;
-        }
-        return top;
-      }
-      function flash(el){
-        el.classList.remove("flash");
-        void el.offsetWidth;
-        el.classList.add("flash");
-      }
-      document.querySelectorAll(".issue-card").forEach(card => {
-        card.addEventListener("click", e => {
-          e.preventDefault();
-          const id = card.dataset.anchor;
-          const target = document.getElementById(id);
-          if (!target || !docPane) return;
-          docPane.scrollTo({ top: offsetTop(target, docPane) - 12, behavior:"smooth" });
-          flash(target);
-        });
-      });
-    })();
-    </script>
-    """)
-    full_html = PAGE_TMPL.substitute(left_html=left_html, right_html=right_html)
+    PAGE_TMPL = Template("""...""")  # your existing HTML template here
+    full_html = _render_page(left_html, right_html)
     return full_html, issues_sorted
-
 
 # ===========================
 # NEW: Analyze raw pasted text
@@ -1230,7 +1444,7 @@ def analyze_text_input(text_input: str):
     })();
     </script>
     """)
-    full_html = PAGE_TMPL.substitute(left_html=left_html, right_html=right_html)
+    full_html = _render_page(left_html, right_html)
     return full_html, issues_sorted
 
 # ===========================
